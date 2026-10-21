@@ -6,7 +6,7 @@ dithered_photos-test/
 .runtime/
 .update_backups/
 
-# Runtime config (copy settings.example.json → settings.json)
+# Runtime config (written from settings_defaults.py on first start)
 settings.json
 .env
 .env.*

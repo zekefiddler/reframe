@@ -20,6 +20,8 @@ from starlette.background import BackgroundTask
 import httpx
 from PIL import Image
 
+from settings_defaults import merge_defaults
+
 CAMERA_AVAILABLE = False
 
 # Constants
@@ -186,11 +188,13 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     number(camera.get("sharpness"), "camera.sharpness", 0, 10)
     if camera.get("autofocus_mode") not in {0, 1, 2}:
         raise SettingsValidationError("camera.autofocus_mode must be 0, 1, or 2")
+    boolean(camera.get("rotate_180"), "camera.rotate_180")
 
     processing = section(settings, "processing", "processing")
     number(processing.get("saturation"), "processing.saturation", 0, 2)
     number(processing.get("brightness_factor"), "processing.brightness_factor", 0.1, 3)
     number(processing.get("color_factor"), "processing.color_factor", 0.1, 3)
+    number(processing.get("contrast"), "processing.contrast", 0.3, 2)
     if processing.get("dithering_method") not in {"floyd_steinberg", "ordered"}:
         raise SettingsValidationError("processing.dithering_method is unsupported")
     if processing.get("bayer_size") not in {2, 4, 8}:
@@ -201,6 +205,11 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     boolean(display.get("auto_display"), "display.auto_display")
     number(display.get("display_timeout"), "display.display_timeout", 0, 3600)
     boolean(display.get("fast_refresh", False), "display.fast_refresh")
+    if display.get("orientation") not in {"landscape", "portrait"}:
+        raise SettingsValidationError("display.orientation must be landscape or portrait")
+    if display.get("portrait_rotation") not in {90, 270}:
+        raise SettingsValidationError("display.portrait_rotation must be 90 or 270")
+    integer(display.get("slideshow_interval_seconds"), "display.slideshow_interval_seconds", 0, 86400)
 
     system = section(settings, "system", "system")
     integer(system.get("auto_refresh_interval"), "system.auto_refresh_interval", 5, 300)
@@ -223,44 +232,7 @@ class SettingsManager:
     
     def __init__(self, settings_path: str = SETTINGS_PATH):
         self.settings_path = Path(settings_path)
-        self.default_settings = {
-            "camera": {
-                "resolution": {"width": 1200, "height": 800},
-                "exposure_value": 0,
-                "sharpness": 3,
-                "autofocus_mode": 2
-            },
-            "processing": {
-                "saturation": 0.6,
-                "brightness_factor": 1.1,
-                "color_factor": 1.4,
-                "dithering_method": "floyd_steinberg",
-                "bayer_size": 4,
-                "threshold_scale": 1.0
-            },
-            "display": {
-                "auto_display": True,
-                "display_timeout": 0,
-                "fast_refresh": False
-            },
-            "system": {
-                "auto_refresh_interval": 30,
-                "auto_timeout_minutes": 10,
-                "auto_timeout_enabled": True,
-                "show_dashboard_qr_on_wifi_connect": True,
-                "camera_name": ""
-            },
-            "exports": {
-                "upscale_dithered_2x": False
-            },
-            "extensions": {
-                "arena": {
-                    "enabled": False,
-                    "channel": "",
-                    "access_token": ""
-                }
-            }
-        }
+        self.default_settings = merge_defaults({})
         self._ensure_settings_file()
     
     def _ensure_settings_file(self):
@@ -276,7 +248,7 @@ class SettingsManager:
             # Ensure all default keys exist
             return self._merge_with_defaults(settings)
         except (FileNotFoundError, json.JSONDecodeError):
-            return self.default_settings.copy()
+            return merge_defaults({})
 
     def load_public_settings(self) -> Dict[str, Any]:
         """Load settings safe to return to the browser."""
@@ -329,13 +301,8 @@ class SettingsManager:
                 os.unlink(temp_path)
     
     def _merge_with_defaults(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge loaded settings with defaults to ensure all keys exist."""
-        system_settings = settings.get("system")
-        if isinstance(system_settings, dict):
-            legacy_value = system_settings.pop("show_dashboard_qr_on_first_network", None)
-            if "show_dashboard_qr_on_wifi_connect" not in system_settings and legacy_value is not None:
-                system_settings["show_dashboard_qr_on_wifi_connect"] = legacy_value
-        return self._deep_merge(self.default_settings.copy(), settings)
+        """Merge loaded settings with defaults (this also migrates legacy keys)."""
+        return merge_defaults(settings)
     
     def _deep_merge(self, default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
         """Deep merge two dictionaries."""
@@ -1716,6 +1683,16 @@ async def dashboard():
                             </select>
                         </div>
                     </div>
+                    <div class="setting-group">
+                        <div>
+                            <span class="setting-label">camera upside down</span>
+                            <select id="rotate-180" class="setting-input">
+                                <option value="false">no</option>
+                                <option value="true">yes</option>
+                            </select>
+                        </div>
+                        <div class="setting-help">Turn on if the camera is mounted upside down in the case.</div>
+                    </div>
                 </div>
                 
                 <div class="settings-section settings-processing">
@@ -1740,6 +1717,13 @@ async def dashboard():
                             <input type="number" id="color-factor" class="setting-input" step="0.1" min="0.1" max="3">
                         </div>
                         <div class="setting-help">Boosts color intensity before dithering; recommended 1.1–1.3.</div>
+                    </div>
+                    <div class="setting-group">
+                        <div>
+                            <span class="setting-label">contrast</span>
+                            <input type="number" id="contrast" class="setting-input" step="0.05" min="0.3" max="2">
+                        </div>
+                        <div class="setting-help">Below 1 softens contrast before dithering.</div>
                     </div>
                     <div class="setting-group">
                         <div>
@@ -1771,6 +1755,33 @@ async def dashboard():
                 
                 <div class="settings-section settings-system">
                     <h3>system settings</h3>
+                    <div class="setting-group">
+                        <div>
+                            <span class="setting-label">orientation</span>
+                            <select id="orientation" class="setting-input">
+                                <option value="landscape">landscape</option>
+                                <option value="portrait">portrait</option>
+                            </select>
+                        </div>
+                        <div class="setting-help">How you hold the camera. Portrait turns saved photos and on-screen messages upright.</div>
+                    </div>
+                    <div class="setting-group">
+                        <div>
+                            <span class="setting-label">portrait rotation</span>
+                            <select id="portrait-rotation" class="setting-input">
+                                <option value="90">90°</option>
+                                <option value="270">270°</option>
+                            </select>
+                        </div>
+                        <div class="setting-help">Which way is up when you hold it in portrait.</div>
+                    </div>
+                    <div class="setting-group">
+                        <div>
+                            <span class="setting-label">slideshow (minutes)</span>
+                            <input type="number" id="slideshow-minutes" class="setting-input" min="0" max="1440">
+                        </div>
+                        <div class="setting-help">Steps to the next older photo this often. 0 turns the slideshow off.</div>
+                    </div>
                     <div class="setting-group">
                         <div>
                             <span class="setting-label">camera name</span>
@@ -2017,7 +2028,7 @@ async def dashboard():
                     const resp = await fetch('/api/display/clear', { method: 'POST' });
                     if (!resp.ok) throw new Error(await resp.text());
                     const data = await resp.json();
-                    alert(data.message || 'screen cleared');
+                    alert(data.success ? (data.message || 'screen cleared') : 'The screen is refreshing. Try again when it finishes.');
                 } catch (error) {
                     console.error('Error clearing screen:', error);
                     alert('failed to clear screen');
@@ -2289,7 +2300,11 @@ async def dashboard():
                     
                     if (response.ok) {
                         const result = await response.json();
-                        alert(result.message);
+                        alert(result.success ? result.message
+                            : result.error === 'display_busy' ? 'The screen is refreshing. Try again when it finishes.'
+                            : result.error === 'unreadable' ? "This photo's file could not be read. Try reprocessing it, or delete it."
+                            : result.error === 'not_found' ? 'That photo is no longer on the camera.'
+                            : `Error: ${result.error || result.message}`);
                     } else {
                         const error = await response.json();
                         alert(`Error: ${error.detail}`);
@@ -2478,11 +2493,13 @@ async def dashboard():
                 document.getElementById('exposure-value').value = settings.camera.exposure_value;
                 document.getElementById('sharpness').value = settings.camera.sharpness;
                 document.getElementById('autofocus-mode').value = settings.camera.autofocus_mode;
+                document.getElementById('rotate-180').value = settings.camera.rotate_180 ? 'true' : 'false';
                 
                 // Processing settings
                 document.getElementById('saturation').value = settings.processing.saturation;
                 document.getElementById('brightness-factor').value = settings.processing.brightness_factor;
                 document.getElementById('color-factor').value = settings.processing.color_factor;
+                document.getElementById('contrast').value = settings.processing.contrast;
                 document.getElementById('dithering-method').value = settings.processing.dithering_method;
                 document.getElementById('bayer-size').value = settings.processing.bayer_size || 4;
                 document.getElementById('threshold-scale').value = settings.processing.threshold_scale || 1.0;
@@ -2492,6 +2509,9 @@ async def dashboard():
                 
                 // System settings
                 document.getElementById('fast-refresh').value = settings.display?.fast_refresh === true ? 'true' : 'false';
+                document.getElementById('orientation').value = settings.display.orientation;
+                document.getElementById('portrait-rotation').value = String(settings.display.portrait_rotation);
+                document.getElementById('slideshow-minutes').value = Math.round(settings.display.slideshow_interval_seconds / 60);
                 document.getElementById('camera-name').value = settings.system.camera_name || '';
                 document.getElementById('auto-refresh-interval').value = settings.system.auto_refresh_interval;
                 document.getElementById('auto-timeout-enabled').value = settings.system.auto_timeout_enabled ? 'true' : 'false';
@@ -2608,18 +2628,23 @@ async def dashboard():
                             },
                             exposure_value: parseFloat(document.getElementById('exposure-value').value),
                             sharpness: parseInt(document.getElementById('sharpness').value),
-                            autofocus_mode: parseInt(document.getElementById('autofocus-mode').value)
+                            autofocus_mode: parseInt(document.getElementById('autofocus-mode').value),
+                            rotate_180: document.getElementById('rotate-180').value === 'true'
                         },
                         processing: {
                             saturation: parseFloat(document.getElementById('saturation').value),
                             brightness_factor: parseFloat(document.getElementById('brightness-factor').value),
                             color_factor: parseFloat(document.getElementById('color-factor').value),
+                            contrast: parseFloat(document.getElementById('contrast').value),
                             dithering_method: document.getElementById('dithering-method').value,
                             bayer_size: parseInt(document.getElementById('bayer-size').value),
                             threshold_scale: parseFloat(document.getElementById('threshold-scale').value)
                         },
                         display: {
-                            fast_refresh: document.getElementById('fast-refresh').value === 'true'
+                            fast_refresh: document.getElementById('fast-refresh').value === 'true',
+                            orientation: document.getElementById('orientation').value,
+                            portrait_rotation: parseInt(document.getElementById('portrait-rotation').value),
+                            slideshow_interval_seconds: parseInt(document.getElementById('slideshow-minutes').value) * 60
                         },
                         system: {
                             camera_name: document.getElementById('camera-name').value.trim(),
@@ -2669,44 +2694,11 @@ async def dashboard():
             async function resetSettings() {
                 if (confirm('Are you sure you want to reset all settings to defaults?')) {
                     try {
-                        const defaultSettings = {
-                            camera: {
-                                resolution: {width: 1200, height: 800},
-                                exposure_value: 0,
-                                sharpness: 3,
-                                autofocus_mode: 2
-                            },
-                            processing: {
-                                saturation: 0.6,
-                                brightness_factor: 1.1,
-                                color_factor: 1.4,
-                                dithering_method: "floyd_steinberg",
-                                bayer_size: 4,
-                                threshold_scale: 1.0
-                            },
-                            display: {
-                                fast_refresh: false
-                            },
-                            system: {
-                                camera_name: "",
-                                auto_refresh_interval: 30,
-                                auto_timeout_enabled: true,
-                                auto_timeout_minutes: 10,
-                                show_dashboard_qr_on_wifi_connect: true
-                            },
-                            exports: {
-                                upscale_dithered_2x: false
-                            },
-                            extensions: {
-                                arena: {
-                                    enabled: false,
-                                    channel: "",
-                                    access_token: "",
-                                    access_token_clear: true
-                                }
-                            }
-                        };
-                        
+                        const defaultsResponse = await fetch('/api/settings/defaults');
+                        if (!defaultsResponse.ok) throw new Error('Could not load default settings');
+                        const defaultSettings = await defaultsResponse.json();
+                        defaultSettings.extensions.arena.access_token_clear = true;
+
                         const response = await fetch('/api/settings', {
                             method: 'POST',
                             headers: {
@@ -3339,6 +3331,12 @@ async def download_dithered_photo(filename: str):
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{export_filename}"'}
     )
+
+@app.get("/api/settings/defaults")
+async def get_default_settings():
+    """Get the default settings (used by the reset button)."""
+    return merge_defaults({})
+
 
 @app.get("/api/settings")
 async def get_settings():

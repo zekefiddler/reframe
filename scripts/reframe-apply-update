@@ -1,26 +1,49 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_PATH="/home/cam/reframe"
-CAM_HOME="/home/cam"
-VENV_PATH="$REPO_PATH/.venv"
+# Who runs reFrame and where it lives. install.sh writes /etc/default/reframe
+# (root-owned); the defaults below are upstream's dedicated "cam" user.
+REFRAME_USER="cam"
+REFRAME_GROUP="cam"
+REFRAME_REPO="/home/cam/reframe"
+if [ -f /etc/default/reframe ]; then
+    # shellcheck source=/dev/null
+    . /etc/default/reframe
+    echo "Using /etc/default/reframe: user $REFRAME_USER, repo $REFRAME_REPO"
+else
+    echo "No /etc/default/reframe; using the default cam user and /home/cam/reframe"
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "reframe-apply-update must run as root" >&2
     exit 1
 fi
 
+if ! [[ "$REFRAME_USER" =~ ^[a-z_][a-z0-9_-]*$ && "$REFRAME_GROUP" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo "Invalid REFRAME_USER or REFRAME_GROUP in /etc/default/reframe" >&2
+    exit 1
+fi
+if ! [[ "$REFRAME_REPO" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "Invalid REFRAME_REPO in /etc/default/reframe" >&2
+    exit 1
+fi
+REFRAME_HOME="$(getent passwd "$REFRAME_USER" | cut -d: -f6 || true)"
+if [ -z "$REFRAME_HOME" ]; then
+    echo "User $REFRAME_USER does not exist" >&2
+    exit 1
+fi
+
+REPO_PATH="$REFRAME_REPO"
+VENV_PATH="$REPO_PATH/.venv"
+
 required_files=(
     requirements.txt
     scripts/enable_hdr.sh
     scripts/reframe-apply-update
     scripts/reframe-python
-    scripts/reframe-rtc-sync
     systemd/reframe.service
     systemd/reframe-dashboard.service
     systemd/reframe-dashboard-proxy.service
-    systemd/reframe-rtc-restore.service
-    systemd/reframe-rtc-update.service
 )
 
 for required in "${required_files[@]}"; do
@@ -35,27 +58,26 @@ if ! dpkg-query -W -f='${Status}' python3-venv 2>/dev/null | grep -q "install ok
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv
 fi
 
-runuser -u cam -- env HOME="$CAM_HOME" /usr/bin/python3 -m venv --system-site-packages "$VENV_PATH"
-runuser -u cam -- env HOME="$CAM_HOME" PYTHONNOUSERSITE=1 "$VENV_PATH/bin/python" -m pip install -r "$REPO_PATH/requirements.txt"
+runuser -u "$REFRAME_USER" -- env HOME="$REFRAME_HOME" /usr/bin/python3 -m venv --system-site-packages "$VENV_PATH"
+runuser -u "$REFRAME_USER" -- env HOME="$REFRAME_HOME" PYTHONNOUSERSITE=1 "$VENV_PATH/bin/python" -m pip install -r "$REPO_PATH/requirements.txt"
+
+# The unit files in the repo name the "cam" user and /home/cam/reframe; fill in this install's.
+render_unit() {
+    sed -e "s|/home/cam/reframe|$REFRAME_REPO|g" \
+        -e "s|^User=cam$|User=$REFRAME_USER|" \
+        -e "s|^Group=cam$|Group=$REFRAME_GROUP|" \
+        "$REPO_PATH/systemd/$1" > "/etc/systemd/system/$1"
+    chmod 0644 "/etc/systemd/system/$1"
+}
 
 install -o root -g root -m 0755 "$REPO_PATH/scripts/reframe-apply-update" /usr/local/sbin/reframe-apply-update
-install -o root -g root -m 0755 "$REPO_PATH/scripts/reframe-rtc-sync" /usr/local/sbin/reframe-rtc-sync
-install -o root -g root -m 0644 "$REPO_PATH/systemd/reframe.service" /etc/systemd/system/reframe.service
-install -o root -g root -m 0644 "$REPO_PATH/systemd/reframe-dashboard.service" /etc/systemd/system/reframe-dashboard.service
-install -o root -g root -m 0644 "$REPO_PATH/systemd/reframe-dashboard-proxy.service" /etc/systemd/system/reframe-dashboard-proxy.service
-install -o root -g root -m 0644 "$REPO_PATH/systemd/reframe-rtc-restore.service" /etc/systemd/system/reframe-rtc-restore.service
-install -o root -g root -m 0644 "$REPO_PATH/systemd/reframe-rtc-update.service" /etc/systemd/system/reframe-rtc-update.service
+render_unit reframe.service
+render_unit reframe-dashboard.service
+render_unit reframe-dashboard-proxy.service
 install -d -o root -g root -m 0755 /var/lib/reframe
 chmod 0755 "$REPO_PATH/scripts/enable_hdr.sh"
 chmod 0755 "$REPO_PATH/scripts/reframe-python"
-timedatectl set-timezone UTC
-timedatectl set-ntp true
-
-if [ -f /etc/default/pisugar-server ]; then
-    sed -i -E 's|--tcp[[:space:]]+0\.0\.0\.0:8423|--tcp 127.0.0.1:8423|' /etc/default/pisugar-server
-fi
 
 systemctl daemon-reload
-systemctl enable reframe-rtc-restore.service reframe-rtc-update.service
 
 echo "Dependencies and service files updated; reboot to run the new code."
