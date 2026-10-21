@@ -1431,6 +1431,10 @@ class CameraSystem:
         """Record what the panel shows; it survives restarts so screens are not redrawn."""
         self.panel_showing = value
         self.last_panel_change = time.monotonic()
+        self._write_panel_state(value)
+
+    @staticmethod
+    def _write_panel_state(value):
         try:
             os.makedirs(os.path.dirname(PANEL_STATE_PATH), exist_ok=True)
             temp_path = f"{PANEL_STATE_PATH}.tmp"
@@ -1439,6 +1443,10 @@ class CameraSystem:
             os.replace(temp_path, PANEL_STATE_PATH)
         except OSError as e:
             logging.warning(f"Could not save panel state: {e}")
+
+    def _panel_refresh_started(self):
+        """Until the refresh completes, a restart finds the panel state unknown and redraws it."""
+        self._write_panel_state("")
 
     def _display_settings(self):
         return self.camera_manager.settings.get("display", {})
@@ -1481,6 +1489,7 @@ class CameraSystem:
             buffer, lambda: self._set_panel_showing(photo_id)
         ):
             return {"success": False, "error": "display_busy"}
+        self._panel_refresh_started()
         logging.info(f"Showing photo {photo_id}")
         return {"success": True, "photo_id": photo_id, "message": f"Showing photo {photo_id}"}
 
@@ -1489,11 +1498,12 @@ class CameraSystem:
         if self.eink_display.is_busy():
             return {"success": False, "error": "display_busy"}
         ids = self.file_manager.photo_ids()
-        candidates, current = [], self.panel_showing
-        for _ in ids:
-            current = next_photo_id(ids, current)
-            candidates.append(current)
-        return self._show_first_readable(candidates)
+        first = next_photo_id(ids, self.panel_showing)
+        if first is None:
+            return {"success": False, "error": "empty_roll"}
+        # Older photos from the first candidate down, then wrap from the newest.
+        start = ids.index(first)
+        return self._show_first_readable(ids[start::-1] + ids[:start:-1])
 
     def _show_first_readable(self, photo_ids):
         """Show the first of these photos that can be read, skipping damaged files."""
@@ -1513,6 +1523,7 @@ class CameraSystem:
             ImageProcessor.img2buffer(screen), lambda: self._set_panel_showing("empty")
         ):
             return False
+        self._panel_refresh_started()
         logging.info("Showing the empty-roll screen")
         return True
 
@@ -1533,8 +1544,11 @@ class CameraSystem:
             if not ids:
                 return self.show_empty_roll_if_needed()
             saving = self._save_thread is not None and self._save_thread.is_alive()
-            if (self.panel_showing or "").isdigit() and self.panel_showing not in ids and not saving:
-                # The photo on the panel was deleted: move to the newest one left.
+            # First run, or a refresh was interrupted (left alone when auto display is off).
+            unknown = self.panel_showing is None and self._display_settings().get("auto_display", True)
+            deleted = (self.panel_showing or "").isdigit() and self.panel_showing not in ids
+            if (unknown or deleted) and not saving:
+                # Put the newest photo up rather than leave a half-drawn or deleted one.
                 return self._show_first_readable(reversed(ids)).get("success", False)
             interval = self._display_settings().get("slideshow_interval_seconds", 0)
             if interval > 0 and now - self.last_panel_change >= interval:
@@ -1561,7 +1575,10 @@ class CameraSystem:
         threading.Thread(target=_loop, daemon=True).start()
 
     def clear_display_api(self):
-        return self.eink_display.clear_display(lambda: self._set_panel_showing("clear"))
+        result = self.eink_display.clear_display(lambda: self._set_panel_showing("clear"))
+        if result.get("success"):
+            self._panel_refresh_started()
+        return result
 
     def start_timeout_monitor(self):
         """Start the background timeout monitoring thread."""
@@ -1634,10 +1651,13 @@ class CameraSystem:
                 "access": access_info
             }
 
-        return self.eink_display.display_dashboard_qr(
+        result = self.eink_display.display_dashboard_qr(
             access_info, orientation_rotation(self._display_settings()),
             lambda: self._set_panel_showing("qr"),
         )
+        if result.get("success"):
+            self._panel_refresh_started()
+        return result
 
     def start_dashboard_qr_monitor(self):
         """Watch for usable network changes for the lifetime of the process."""
@@ -1733,9 +1753,10 @@ class CameraSystem:
                 # Send to display ASAP (async — screen starts blinking immediately)
                 if display_settings.get("auto_display", True):
                     logging.info("Sending to display (async)")
-                    self.eink_display.display_buffer_async(
+                    if self.eink_display.display_buffer_async(
                         display_buffer, lambda: self._set_panel_showing(result["photo_id"])
-                    )
+                    ):
+                        self._panel_refresh_started()
 
                 display_sent_time = time.monotonic()
                 logging.info(f"Total button-to-display: {((display_sent_time - pipeline_start)*1000):.0f}ms")

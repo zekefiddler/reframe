@@ -405,3 +405,15 @@ def test_truncated_png_falls_back_to_the_original(system):
         f.truncate(100)                                                 # power cut while saving the PNG
     assert system.show_photo(pid)["success"]; settle(system)
     assert system.panel_showing == pid
+
+
+def test_refresh_interrupted_by_restart_is_redrawn(system, tmp_path):
+    p1, p2 = snap(system), snap(system)
+    gate = threading.Event()
+    system.eink_display.epd.display = lambda buf, fast_refresh=False: gate.wait(5)
+    assert system.show_photo(p1)["success"]                 # service killed while this draws
+    restarted = make_system(tmp_path)
+    assert restarted.panel_showing is None                  # half-drawn panel: state unknown
+    assert restarted.panel_tick(time.monotonic()); settle(restarted)
+    assert restarted.panel_showing == p2
+    gate.set(); settle(system)
