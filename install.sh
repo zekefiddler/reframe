@@ -21,28 +21,17 @@ BOOT_CONFIG="/boot/config.txt"
 [ -f "/boot/firmware/config.txt" ] && BOOT_CONFIG="/boot/firmware/config.txt"
 BOOT_CMDLINE="/boot/cmdline.txt"
 [ -f "/boot/firmware/cmdline.txt" ] && BOOT_CMDLINE="/boot/firmware/cmdline.txt"
-REQUIRED_USER="cam"
-REQUIRED_REPO="/home/cam/reframe"
 CURRENT_USER="$(id -un)"
-VENV_DIR="$SCRIPT_DIR/.venv"
+CURRENT_GROUP="$(id -gn)"
 
 if [ "$(id -u)" -eq 0 ]; then
     error "Do not run install.sh with sudo or as root."
-    error "Log in as '$REQUIRED_USER' and run: cd $REQUIRED_REPO && ./install.sh"
+    error "Log in as the user who will run the camera and run: cd $SCRIPT_DIR && ./install.sh"
     exit 1
 fi
 
-if [ "$CURRENT_USER" != "$REQUIRED_USER" ]; then
-    error "reFrame must currently be installed as the '$REQUIRED_USER' user."
-    error "The services and software updater use that account."
-    error "Re-flash or create the '$REQUIRED_USER' account, then clone the repo to $REQUIRED_REPO."
-    exit 1
-fi
-
-if [ "$SCRIPT_DIR" != "$REQUIRED_REPO" ]; then
-    error "reFrame must currently be cloned at $REQUIRED_REPO."
-    error "Current location: $SCRIPT_DIR"
-    error "Move or clone the repository to the required location, then run install.sh again."
+if ! [[ "$SCRIPT_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    error "Clone reFrame to a path without spaces or special characters (now: $SCRIPT_DIR)"
     exit 1
 fi
 
@@ -63,89 +52,13 @@ sudo apt install -y -qq \
     python3-picamera2 \
     python3-spidev \
     python3-gpiozero \
+    python3-lgpio \
     v4l-utils \
-    i2c-tools \
-    netcat-openbsd \
-    wget
+    netcat-openbsd
 
 info "System packages installed"
 
-step "Enabling I2C"
-
-sudo raspi-config nonint do_i2c 0
-info "I2C enabled"
-
-# ── 2. Python packages ──────────────────────
-step "Installing Python packages"
-
-/usr/bin/python3 -m venv --system-site-packages "$VENV_DIR"
-PYTHONNOUSERSITE=1 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
-
-info "Python packages installed in $VENV_DIR"
-
-# ── 3. PiSugar Power Manager ────────────────
-step "Checking for PiSugar Power Manager"
-
-configure_pisugar() {
-    if ! command -v nc >/dev/null 2>&1; then
-        warn "Cannot configure PiSugar automatically: nc is not installed"
-        return
-    fi
-
-    sudo systemctl start pisugar-server 2>/dev/null || true
-
-    for attempt in 1 2 3 4 5; do
-        if echo "get model" | nc -w 2 -q 0 127.0.0.1 8423 >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-    done
-
-    if ! echo "get model" | nc -w 2 -q 0 127.0.0.1 8423 >/dev/null 2>&1; then
-        warn "pisugar-server is installed but not responding on port 8423"
-        warn "After it starts, run: echo 'set_anti_mistouch false' | nc -q 0 127.0.0.1 8423"
-        return
-    fi
-
-    if echo "set_anti_mistouch false" | nc -w 2 -q 0 127.0.0.1 8423 | grep -qi "done"; then
-        info "Disabled PiSugar anti-mistouch so one press powers on the camera"
-    else
-        warn "Could not disable PiSugar anti-mistouch automatically"
-        warn "Manual command: echo 'set_anti_mistouch false' | nc -q 0 127.0.0.1 8423"
-    fi
-}
-
-install_pisugar_power_manager() {
-    local installer="/tmp/pisugar-power-manager.sh"
-
-    info "Installing PiSugar Power Manager"
-    wget -q -O "$installer" https://cdn.pisugar.com/release/pisugar-power-manager.sh
-    bash "$installer" -c release
-}
-
-if systemctl list-unit-files | grep -q pisugar-server; then
-    info "pisugar-server is already installed"
-    configure_pisugar
-else
-    warn "pisugar-server not found"
-    echo ""
-    echo "  The PiSugar 3 requires pisugar-server for battery monitoring,"
-    echo "  power management, and one-press power-on configuration."
-    echo "  The official PiSugar installer may ask you to select a model."
-    echo "  Choose 'PiSugar 3' when prompted."
-    echo ""
-
-    install_pisugar_power_manager
-
-    if systemctl list-unit-files | grep -q pisugar-server; then
-        configure_pisugar
-    else
-        warn "PiSugar installer finished, but pisugar-server was not found"
-        warn "Manual install: https://github.com/PiSugar/PiSugar/wiki/PiSugar-3-Series"
-    fi
-fi
-
-# ── 4. Enable hardware interfaces ───────────
+# ── 2. Enable hardware interfaces ───────────
 step "Enabling hardware interfaces"
 
 # Enable SPI
@@ -159,7 +72,7 @@ else
     info "Camera auto-detect already enabled"
 fi
 
-# ── 5. Boot-speed hardware trims ────────────
+# ── 3. Boot-speed hardware trims ────────────
 step "Applying boot-speed hardware trims"
 
 ensure_boot_config_line() {
@@ -202,13 +115,13 @@ fi
 
 info "Applied headless Bluetooth, audio, display-probe, console, and boot-delay trims"
 
-# ── 6. User permissions ─────────────────────
+# ── 4. User permissions ─────────────────────
 step "Setting up user permissions"
 
-sudo usermod -a -G video,i2c,spi,gpio "$USER"
-info "Added $USER to hardware groups (video, i2c, spi, gpio)"
+sudo usermod -a -G video,spi,gpio "$CURRENT_USER"
+info "Added $CURRENT_USER to hardware groups (video, spi, gpio)"
 
-# ── 7. Configuration ────────────────────────
+# ── 5. Configuration ────────────────────────
 step "Setting up configuration"
 
 # Create photo directories
@@ -216,71 +129,46 @@ mkdir -p "$SCRIPT_DIR/photos"
 mkdir -p "$SCRIPT_DIR/dithered_photos"
 info "Photo directories ready"
 
-# ── 8. Runtime scripts ──────────────────────
+# ── 6. Runtime scripts ──────────────────────
 step "Setting up runtime scripts"
 
 chmod +x "$SCRIPT_DIR/scripts/enable_hdr.sh"
 chmod +x "$SCRIPT_DIR/scripts/reframe-python"
 info "Runtime scripts marked executable"
 
+# Tell the root-owned update helper which user and checkout to use.
+printf 'REFRAME_USER=%s\nREFRAME_GROUP=%s\nREFRAME_REPO=%s\n' "$CURRENT_USER" "$CURRENT_GROUP" "$SCRIPT_DIR" \
+    | sudo tee /etc/default/reframe > /dev/null
+sudo chown root:root /etc/default/reframe
+sudo chmod 644 /etc/default/reframe
+
 # Install the narrow privileged helper used after dashboard git updates.
 sudo install -o root -g root -m 0755 "$SCRIPT_DIR/scripts/reframe-apply-update" /usr/local/sbin/reframe-apply-update
-echo "cam ALL=(root) NOPASSWD: /usr/local/sbin/reframe-apply-update" | sudo tee /etc/sudoers.d/reframe-update-helper > /dev/null
+echo "$CURRENT_USER ALL=(root) NOPASSWD: /usr/local/sbin/reframe-apply-update" | sudo tee /etc/sudoers.d/reframe-update-helper > /dev/null
 sudo chmod 440 /etc/sudoers.d/reframe-update-helper
 sudo visudo -cf /etc/sudoers.d/reframe-update-helper > /dev/null
 info "Installed software update helper"
 
-# ── 9. Systemd services ─────────────────────
+# ── 7. Systemd services ─────────────────────
 step "Installing systemd services"
 
-# Install the PiSugar RTC synchronization helper and services.
-sudo install -o root -g root -m 0755 "$SCRIPT_DIR/scripts/reframe-rtc-sync" /usr/local/sbin/reframe-rtc-sync
-sudo cp "$SCRIPT_DIR/systemd/reframe-rtc-restore.service" /etc/systemd/system/reframe-rtc-restore.service
-sudo cp "$SCRIPT_DIR/systemd/reframe-rtc-update.service" /etc/systemd/system/reframe-rtc-update.service
-sudo chmod 644 \
-    /etc/systemd/system/reframe-rtc-restore.service \
-    /etc/systemd/system/reframe-rtc-update.service
-sudo install -d -o root -g root -m 0755 /var/lib/reframe
-sudo timedatectl set-timezone UTC
-sudo timedatectl set-ntp true
-
-# The TCP command API can change power and RTC settings and has no per-command
-# authentication. Keep the web UI reachable on 8421, but bind commands on 8423
-# to localhost; reFrame's helper uses PiSugar's root-only Unix socket.
-if [ -f /etc/default/pisugar-server ]; then
-    sudo sed -i -E 's|--tcp[[:space:]]+0\.0\.0\.0:8423|--tcp 127.0.0.1:8423|' /etc/default/pisugar-server
-fi
-info "Installed PiSugar RTC boot/network synchronization"
-
-# Install camera service
-sudo cp "$SCRIPT_DIR/systemd/reframe.service" /etc/systemd/system/reframe.service
-sudo chmod 644 /etc/systemd/system/reframe.service
-info "Installed reframe.service"
-
-# Install dashboard service
-sudo cp "$SCRIPT_DIR/systemd/reframe-dashboard.service" /etc/systemd/system/reframe-dashboard.service
-sudo chmod 644 /etc/systemd/system/reframe-dashboard.service
-info "Installed reframe-dashboard.service"
-
-# Install dashboard proxy service (port 80 -> 8000)
-sudo cp "$SCRIPT_DIR/systemd/reframe-dashboard-proxy.service" /etc/systemd/system/reframe-dashboard-proxy.service
-sudo chmod 644 /etc/systemd/system/reframe-dashboard-proxy.service
-info "Installed reframe-dashboard-proxy.service"
+# The update helper builds the Python environment and installs the three
+# service units, filled in with this user and checkout.
+sudo /usr/local/sbin/reframe-apply-update
+info "Installed Python environment and reframe services"
 
 # Reload and enable
 sudo systemctl daemon-reload
 sudo systemctl reenable reframe.service
 sudo systemctl enable reframe-dashboard.service
 sudo systemctl enable reframe-dashboard-proxy.service
-sudo systemctl enable reframe-rtc-restore.service
-sudo systemctl enable reframe-rtc-update.service
 info "Services enabled (will start on boot)"
 
-# ── 10. Boot-speed service trims ─────────────
+# ── 8. Boot-speed service trims ─────────────
 step "Disabling nonessential boot services"
 
 # These are reversible trims for a headless camera. WiFi, SSH, mDNS/Avahi,
-# PiSugar, and all reFrame services are intentionally left enabled.
+# and all reFrame services are intentionally left enabled.
 sudo systemctl disable --now \
     ModemManager.service \
     triggerhappy.service \
