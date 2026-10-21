@@ -327,3 +327,35 @@ def test_dashboard_has_spectra6_controls(dashboard):
     for element_id in ("autofocus-mode", "rotate-180", "contrast", "orientation", "portrait-rotation", "slideshow-minutes"):
         assert f'id="{element_id}"' in html
     assert "/api/settings/defaults" in html
+
+
+def test_unreadable_photo_is_skipped_not_fatal(system):
+    p1, p2, p3 = snap(system), snap(system), snap(system)
+    with open(os.path.join(reframe.SAVE_PATH, f"{p2}.jpg"), "r+b") as f:
+        f.truncate(200)                                                 # power cut mid-save
+    os.remove(os.path.join(reframe.PROCESSED_PATH, f"{p2}_dithered.png"))
+    assert reframe.handle_button_press(system, "next")["success"]; settle(system)
+    assert system.panel_showing == p1
+    system.camera_manager.settings["display"]["slideshow_interval_seconds"] = 60
+    system._set_panel_showing(p3)
+    assert system.panel_tick(system.last_panel_change + 60); settle(system)
+    assert system.panel_showing == p1
+
+
+def test_deleting_shown_photo_mid_refresh_moves_to_newest(system):
+    p1, p2 = snap(system), snap(system)
+    system.eink_display._display_busy = True
+    system.delete_photo_api(p2)
+    system.eink_display._display_busy = False
+    assert system.panel_tick(time.monotonic()); settle(system)
+    assert system.panel_showing == p1
+
+
+def test_failed_refresh_is_redrawn_after_restart(system, tmp_path):
+    def broken(buf, fast_refresh=False): raise OSError("SPI write failed")
+    system.eink_display.epd.display = broken
+    assert system.panel_tick(time.monotonic()); settle(system)
+    assert system.panel_showing is None
+    restarted = make_system(tmp_path)
+    assert restarted.panel_tick(time.monotonic()); settle(restarted)
+    assert restarted.panel_showing == "empty"

@@ -1300,8 +1300,11 @@ class EInkDisplay:
         if buffer:
             self.epd.display(buffer, fast_refresh=self._fast_refresh_enabled())
 
-    def _refresh_async(self, action, label):
+    def _refresh_async(self, action, label, on_done=None):
         """Run one panel refresh in a background thread; False if the panel is busy.
+
+        on_done runs only after the refresh completes, so an interrupted or failed
+        refresh is never recorded as shown.
 
         Sets _display_busy=True before starting and clears it when the refresh
         cycle completes, so every refresh blocks the shutter the same way.
@@ -1321,6 +1324,8 @@ class EInkDisplay:
                 refresh_time = time.monotonic() - refresh_start
                 logging.info(f"{label} completed in {refresh_time:.1f}s")
                 update_diagnostics("display", activity=f"{label} completed")
+                if on_done:
+                    on_done()
             except Exception as e:
                 logging.error(f"{label} error: {e}")
                 update_diagnostics(
@@ -1336,28 +1341,29 @@ class EInkDisplay:
         self._display_thread.start()
         return True
 
-    def display_buffer_async(self, buffer):
+    def display_buffer_async(self, buffer, on_done=None):
         """Send a pre-built display buffer to the panel in the background; False if busy."""
         if not buffer:
             return False
         return self._refresh_async(
             lambda epd: epd.display(buffer, fast_refresh=self._fast_refresh_enabled()),
             "Display refresh",
+            on_done,
         )
 
-    def clear_display(self):
+    def clear_display(self, on_done=None):
         """Clear the e-ink display in the background."""
         if not self._refresh_async(
-            lambda epd: epd.Clear(fast_refresh=self._fast_refresh_enabled()), "Display clear"
+            lambda epd: epd.Clear(fast_refresh=self._fast_refresh_enabled()), "Display clear", on_done
         ):
             return {"success": False, "error": "display_busy"}
         return {"success": True, "message": "Display clearing"}
 
-    def display_dashboard_qr(self, access_info, rotation=0):
+    def display_dashboard_qr(self, access_info, rotation=0, on_done=None):
         """Display a QR code that opens the dashboard."""
         try:
             buffer = ImageProcessor.img2buffer(render_dashboard_qr_image(access_info, rotation))
-            if not self.display_buffer_async(buffer):
+            if not self.display_buffer_async(buffer, on_done):
                 return {"success": False, "error": "display_busy"}
             logging.info("Displaying dashboard QR code: %s", access_info.get("primary_url"))
             return {
@@ -1446,12 +1452,17 @@ class CameraSystem:
         """Show a saved photo on the panel without blocking."""
         if self.eink_display.is_busy():
             return {"success": False, "error": "display_busy"}
-        buffer = self.panel_buffer_for(photo_id)
+        try:
+            buffer = self.panel_buffer_for(photo_id)
+        except Exception as e:
+            logging.error(f"Photo {photo_id} is unreadable: {e}")
+            return {"success": False, "error": "unreadable"}
         if buffer is None:
             return {"success": False, "error": "not_found"}
-        if not self.eink_display.display_buffer_async(buffer):
+        if not self.eink_display.display_buffer_async(
+            buffer, lambda: self._set_panel_showing(photo_id)
+        ):
             return {"success": False, "error": "display_busy"}
-        self._set_panel_showing(photo_id)
         logging.info(f"Showing photo {photo_id}")
         return {"success": True, "photo_id": photo_id, "message": f"Showing photo {photo_id}"}
 
@@ -1459,19 +1470,31 @@ class CameraSystem:
         """Step the panel to the next older photo, wrapping to the newest."""
         if self.eink_display.is_busy():
             return {"success": False, "error": "display_busy"}
-        photo_id = next_photo_id(self.file_manager.photo_ids(), self.panel_showing)
-        if photo_id is None:
-            return {"success": False, "error": "empty_roll"}
-        return self.show_photo(photo_id)
+        ids = self.file_manager.photo_ids()
+        candidates, current = [], self.panel_showing
+        for _ in ids:
+            current = next_photo_id(ids, current)
+            candidates.append(current)
+        return self._show_first_readable(candidates)
+
+    def _show_first_readable(self, photo_ids):
+        """Show the first of these photos that can be read, skipping damaged files."""
+        result = {"success": False, "error": "empty_roll"}
+        for photo_id in photo_ids:
+            result = self.show_photo(photo_id)
+            if result.get("error") != "unreadable":
+                break
+        return result
 
     def show_empty_roll_if_needed(self):
         """Draw the empty-roll screen once, unless the panel already shows something chosen."""
         if self.file_manager.photo_ids() or self.panel_showing in ("empty", "qr", "clear"):
             return False
         screen = render_text_screen(EMPTY_ROLL_TEXT, orientation_rotation(self._display_settings()))
-        if not self.eink_display.display_buffer_async(ImageProcessor.img2buffer(screen)):
+        if not self.eink_display.display_buffer_async(
+            ImageProcessor.img2buffer(screen), lambda: self._set_panel_showing("empty")
+        ):
             return False
-        self._set_panel_showing("empty")
         logging.info("Showing the empty-roll screen")
         return True
 
@@ -1482,8 +1505,13 @@ class CameraSystem:
         try:
             if self.eink_display.is_busy():
                 return False
-            if not self.file_manager.photo_ids():
+            ids = self.file_manager.photo_ids()
+            if not ids:
                 return self.show_empty_roll_if_needed()
+            saving = self._save_thread is not None and self._save_thread.is_alive()
+            if (self.panel_showing or "").isdigit() and self.panel_showing not in ids and not saving:
+                # The photo on the panel was deleted: move to the newest one left.
+                return self._show_first_readable(reversed(ids)).get("success", False)
             interval = self._display_settings().get("slideshow_interval_seconds", 0)
             if interval > 0 and now - self.last_panel_change >= interval:
                 return self.next_photo().get("success", False)
@@ -1504,10 +1532,7 @@ class CameraSystem:
         threading.Thread(target=_loop, daemon=True).start()
 
     def clear_display_api(self):
-        result = self.eink_display.clear_display()
-        if result.get("success"):
-            self._set_panel_showing("clear")
-        return result
+        return self.eink_display.clear_display(lambda: self._set_panel_showing("clear"))
 
     def start_timeout_monitor(self):
         """Start the background timeout monitoring thread."""
@@ -1580,12 +1605,10 @@ class CameraSystem:
                 "access": access_info
             }
 
-        result = self.eink_display.display_dashboard_qr(
-            access_info, orientation_rotation(self._display_settings())
+        return self.eink_display.display_dashboard_qr(
+            access_info, orientation_rotation(self._display_settings()),
+            lambda: self._set_panel_showing("qr"),
         )
-        if result.get("success"):
-            self._set_panel_showing("qr")
-        return result
 
     def start_dashboard_qr_monitor(self):
         """Watch for usable network changes for the lifetime of the process."""
@@ -1681,8 +1704,9 @@ class CameraSystem:
                 # Send to display ASAP (async — screen starts blinking immediately)
                 if display_settings.get("auto_display", True):
                     logging.info("Sending to display (async)")
-                    if self.eink_display.display_buffer_async(display_buffer):
-                        self._set_panel_showing(result["photo_id"])
+                    self.eink_display.display_buffer_async(
+                        display_buffer, lambda: self._set_panel_showing(result["photo_id"])
+                    )
 
                 display_sent_time = time.monotonic()
                 logging.info(f"Total button-to-display: {((display_sent_time - pipeline_start)*1000):.0f}ms")
@@ -1741,14 +1765,9 @@ class CameraSystem:
         return self.file_manager.get_photo_info(photo_id)
 
     def delete_photo_api(self, photo_id):
-        """API-style photo deletion; the panel moves off a deleted photo."""
-        result = self.file_manager.delete_photo(photo_id)
-        if result.get("success") and photo_id == self.panel_showing:
-            remaining = self.file_manager.photo_ids()
-            # An empty roll is left to panel_tick, which retries until the panel is free.
-            if remaining:
-                self.show_photo(remaining[-1])
-        return result
+        """API-style photo deletion."""
+        # panel_tick moves the panel off a deleted photo once the panel is free.
+        return self.file_manager.delete_photo(photo_id)
 
     def reload_settings_api(self):
         """API-style settings reload."""
@@ -2057,7 +2076,6 @@ def main():
         port = 8077
     _start_api_server_in_background(host="127.0.0.1", port=port)
     camera_system.start_dashboard_qr_monitor()
-    camera_system.start_panel_ticker()
 
     # ═══════════════════════════════════════════════════════════════
     # HARDWARE: Buttons — shutter on GPIO5, next on GPIO6, each to GND.
@@ -2068,6 +2086,7 @@ def main():
         "shutter": Button(SHUTTER_PIN, pull_up=True),
         "next": Button(NEXT_PIN, pull_up=True),
     }
+    camera_system.start_panel_ticker()
     was_pressed = {name: False for name in buttons}
     last_press = {name: 0.0 for name in buttons}
 
@@ -2082,7 +2101,10 @@ def main():
                     last_press[name] = now
                     logging.info("%s button pressed", name)
                     update_diagnostics(activity=f"{name.capitalize()} button pressed")
-                    handle_button_press(camera_system, name)
+                    try:
+                        handle_button_press(camera_system, name)
+                    except Exception:
+                        logging.exception("%s button press failed", name)
                 was_pressed[name] = pressed
             sleep(BUTTON_POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
