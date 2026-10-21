@@ -1035,6 +1035,19 @@ class ImageProcessor:
         return ImageProcessor.process_photo_with_settings(original_path, output_file_path, processing_settings)
 
 
+def next_photo_id(ids, current):
+    """The photo the next button shows: the next older one, wrapping to the newest.
+
+    A current value that is not a photo id ("empty", None) counts as the newest showing.
+    """
+    if not ids:
+        return None
+    if current not in ids and not (current or "").isdigit():
+        current = ids[-1]
+    older = [photo_id for photo_id in ids if photo_id < current]
+    return older[-1] if older else ids[-1]
+
+
 class FileManager:
     """Handles file saving and directory management."""
 
@@ -1112,6 +1125,33 @@ class FileManager:
             logging.warning(f"Could not stat photo {photo_id} (may be mid-write): {e}")
             return None
 
+    def photo_ids(self):
+        """Photo ids (file stems) in the save directory, oldest first."""
+        try:
+            files = os.listdir(self.save_path)
+        except OSError as e:
+            logging.error(f"Error listing photos: {e}")
+            return []
+        return sorted({os.path.splitext(f)[0] for f in files
+                       if f.lower().endswith(('.png', '.jpg', '.jpeg'))})
+
+    def _rotation_path(self, photo_id):
+        return os.path.join(self.save_path, f"{photo_id}.json")
+
+    def get_rotation(self, photo_id):
+        """Degrees the saved copies of this photo were rotated (0 when there is no sidecar)."""
+        try:
+            with open(self._rotation_path(photo_id)) as f:
+                return int(json.load(f).get("rotation", 0))
+        except (OSError, ValueError, AttributeError):
+            return 0
+
+    def set_rotation(self, photo_id, rotation):
+        """Record the rotation used for this photo's saved copies."""
+        if rotation:
+            with open(self._rotation_path(photo_id), "w") as f:
+                json.dump({"rotation": rotation}, f)
+
     def list_all_photos(self):
         """List all photos with their information."""
         photos = []
@@ -1148,7 +1188,7 @@ class FileManager:
         # Delete processed version (both png and legacy jpg)
         dithered_png = os.path.join(self.processed_path, f"{photo_id}_dithered.png")
         dithered_jpg = os.path.join(self.processed_path, f"{photo_id}_dithered.jpg")
-        for p in (dithered_png, dithered_jpg):
+        for p in (dithered_png, dithered_jpg, self._rotation_path(photo_id)):
             if os.path.exists(p):
                 os.remove(p)
                 deleted_files.append(p)

@@ -116,3 +116,26 @@ def test_text_screens_are_device_sized_and_upright():
         assert top < upright.height - bottom              # text sits nearer the top when upright
     qr = reframe.render_dashboard_qr_image({"primary_url": "http://x.local", "fallback_url": "http://10.0.0.2"}, 90)
     assert qr.size == (600, 400)
+
+
+def test_next_photo_id_steps_older_and_wraps():
+    ids = ["00001", "00002", "00003"]
+    assert reframe.next_photo_id(ids, None) == "00002"
+    assert reframe.next_photo_id(ids, "empty") == "00002"
+    assert reframe.next_photo_id(ids, "00003") == "00002"
+    assert reframe.next_photo_id(ids, "00002") == "00001"
+    assert reframe.next_photo_id(ids, "00001") == "00003"
+    assert reframe.next_photo_id(["00001", "00003"], "00002") == "00001"   # current was deleted
+    assert reframe.next_photo_id(["00001"], "00001") == "00001"
+    assert reframe.next_photo_id([], None) is None
+
+
+def test_rotation_sidecar(tmp_path):
+    fm = reframe.FileManager(str(tmp_path / "p"), str(tmp_path / "d"))
+    Image.new("RGB", (8, 8)).save(tmp_path / "p" / "00000.jpg")
+    assert fm.get_rotation("00000") == 0
+    fm.set_rotation("00000", 270)
+    assert fm.get_rotation("00000") == 270
+    assert fm.photo_ids() == ["00000"] and len(fm.list_all_photos()) == 1
+    fm.delete_photo("00000")
+    assert not (tmp_path / "p" / "00000.json").exists()
