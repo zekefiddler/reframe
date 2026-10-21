@@ -20,7 +20,7 @@ need.
 |---|---|---|
 | Pi | Zero 2 W | Zero 2 W, hostname `spectra6-cam`, user **`youmeandbirdie`** (sudo asks for a password) |
 | Panel | Waveshare 4" HAT+ (E) | same, mounted on the GPIO header, SPI on, test pattern OK |
-| Camera | Module 3 (autofocus, HDR) | **Module v2, imx219**, fixed focus, no HDR |
+| Camera | Module 3 (autofocus, HDR) | same, **Module 3, imx708** (swapped in for the v2 on 2026-10-21; test still OK) |
 | Power and button | PiSugar 3, button read over I2C 0x57, RTC | **Geekworm X306** UPS (no I2C, no RTC). **Two GPIO buttons:** shutter **GPIO5**, next **GPIO6**, both to GND |
 | Network | Wi-Fi | Wi-Fi, **Tailscale**, and a **USB gadget** (dwc2/g_ether in cmdline, NM `netplan-usb0` at 10.55.2.1/16, `usb-gadget-reconnect.service`). None of these may be disturbed. |
 | OS | Pi OS Lite | Pi OS Lite Trixie, fully upgraded. Timezone America/New_York |
@@ -57,13 +57,9 @@ need.
      relative to the panel. Check it once the case exists.
 4. **Empty-roll screen.** With no photos, the panel shows *Take your first picture
    and wait for it to appear on the screen.*
-5. **Camera v2.**
-   - Remove the HDR helper call (it adds about 3 s to boot) and the AfMode and
-     autofocus settle.
-   - Replace the settle with a short AE/AWB settle, sized so the first frame isn't
-     dark.
-   - Drop `autofocus_mode` from the defaults and the UI. Keep the 1200×800 still
-     size.
+5. **Camera Module 3, as upstream.** Keep the autofocus, the HDR helper and the
+   1200×800 still size unchanged. (This section first targeted the v2; Zeke kept the
+   Module 3 on 2026-10-21.)
 6. **No PiSugar.**
    - Remove the I2C button path and smbus2.
    - The battery reading stays "Unavailable".

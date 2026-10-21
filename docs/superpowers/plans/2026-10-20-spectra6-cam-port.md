@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Port reFrame to Zeke's build: GPIO buttons, next/slideshow, a landscape/portrait switch, an empty-roll screen, Camera v2, no PiSugar, a softer and more colourful default look, and an installer that works for any user.
+**Goal:** Port reFrame to Zeke's build: GPIO buttons, next/slideshow, a landscape/portrait switch, an empty-roll screen, a rotate-180 switch for the camera, no PiSugar, a softer and more colourful default look, and an installer that works for any user.
 
 **Architecture:**
 - Keep upstream's two processes: `reframe.py` owns the hardware and serves a localhost API, and `dashboard.py` is the web UI.
@@ -27,6 +27,7 @@
 - **Empty-roll copy, exactly:** `Take your first picture and wait for it to appear on the screen.`
 - **Buttons:** shutter on **GPIO5** and next on **GPIO6**, each wired to GND with internal pull-ups. The panel pins (RST17, DC25, CS8, BUSY24, PWR18) don't change.
 - **No new pip dependencies.** Remove `smbus2`.
+- **Camera Module 3 (imx708), as upstream** (Zeke switched from the v2 on 2026-10-21). Keep upstream's autofocus (`AfMode`, `autofocus_mode`, `_settle_autofocus`) and the HDR helper (`scripts/enable_hdr.sh`, `_enable_camera_hdr`) unchanged.
 - **Zeke runs every `sudo`,** in as few batched `ssh -t` commands as possible. Claude never asks for or stores his password.
 - **Root surface stays at upstream's level.** The sudoers rule names only `/usr/local/sbin/reframe-apply-update`.
 - **Match upstream style:**
@@ -62,8 +63,7 @@
   - `GET /api/settings/defaults`: returns `merge_defaults({})`.
 - Default values:
   - Same as upstream except:
-    - `camera.autofocus_mode` is removed.
-    - `camera.rotate_180: false`
+    - `camera.rotate_180: false` (`camera.autofocus_mode` stays at 2)
     - `processing.saturation: 0.75`
     - `processing.color_factor: 1.6`
     - `processing.contrast: 0.85`
@@ -79,7 +79,7 @@
   - `display.portrait_rotation` is 90 or 270.
   - `display.slideshow_interval_seconds` is an integer from 0 to 86400.
   - `camera.rotate_180` is a boolean.
-  - Drop the `autofocus_mode` check. Extra keys left in an old `settings.json` are ignored.
+  - Keep the `autofocus_mode` check. Extra keys left in an old `settings.json` are ignored.
 
 - [ ] **Step 1: Write the failing tests.** The top of `test_spectra6.py` stubs out the hardware:
 
@@ -97,7 +97,7 @@ def test_spectra6_defaults():
     assert d["processing"]["saturation"] == 0.75 and d["processing"]["color_factor"] == 1.6
     assert d["display"]["orientation"] == "landscape" and d["display"]["portrait_rotation"] == 90
     assert d["display"]["slideshow_interval_seconds"] == 0
-    assert d["camera"]["rotate_180"] is False and "autofocus_mode" not in d["camera"]
+    assert d["camera"]["rotate_180"] is False and d["camera"]["autofocus_mode"] == 2
     assert d["system"]["auto_timeout_enabled"] is False
     assert d["system"]["show_dashboard_qr_on_wifi_connect"] is False
 
@@ -470,26 +470,22 @@ Add `import time` to the test imports.
 
 ---
 
-### Task 6: Hardware glue: Camera v2, rotate_180, GPIO buttons, startup
+### Task 6: Hardware glue: rotate_180, GPIO buttons, startup
 
 **Files:**
 - Modify: `reframe.py`:
-  - `:80` and `:243-256` (delete `HDR_HELPER_PATH` and `_enable_camera_hdr`)
   - `:154-156` (button diagnostics)
-  - `:389-410`, `:467-509` and `:551-578` (`CameraManager`)
+  - `:467-509` (`CameraManager.configure_camera`)
   - `:1868-2017` (`main`)
   - `:2069-2073` (Ctrl-C)
 - Modify: `requirements.txt` (remove `smbus2`)
-- Delete: `scripts/enable_hdr.sh`
+- Leave alone: the autofocus code and the HDR helper (see Global Constraints).
 
 **Interfaces:**
-- Constants: `SHUTTER_PIN = 5`, `NEXT_PIN = 6`, `AE_SETTLE_SECONDS = 1.0`. They go next to the other HARDWARE constants.
-- `CameraManager`:
-  - **Remove** every `AfMode`/`autofocus_mode` use.
-  - `configure_camera` passes `transform=Transform(hflip=1, vflip=1)` to `create_still_configuration` when `camera.rotate_180` is set. It imports `from libcamera import Transform` inside the function, so tests never import libcamera. It records `self._started_at = time.monotonic()` after `start()`.
-  - `_settle_autofocus` becomes `_settle_exposure()`. It sleeps `max(0, AE_SETTLE_SECONDS - (now - _started_at))`, so only a press right after start or reconfigure waits.
+- Constants: `SHUTTER_PIN = 5`, `NEXT_PIN = 6`. They go next to the other HARDWARE constants.
+- `CameraManager.configure_camera` passes `transform=Transform(hflip=1, vflip=1)` to `create_still_configuration` when `camera.rotate_180` is set. It imports `from libcamera import Transform` inside the function, so tests never import libcamera.
 - `main()`:
-  1. Build the `EInkDisplay` and call `prepare_async` when `auto_display` is on.
+  1. Keep upstream's `_enable_camera_hdr()` call before the camera opens. Build the `EInkDisplay` and call `prepare_async` when `auto_display` is on.
   2. Create `CameraSystem` with no startup capture.
   3. `_notify_systemd_ready("Camera ready")`.
   4. Start the API.
@@ -503,8 +499,8 @@ Add `import time` to the test imports.
 - Ctrl-C: delete the `epd4in0e.epdconfig.module_exit(cleanup=True)` line. `main()`'s `finally` already puts the panel to sleep.
 
 - [ ] **Step 1: Make the change.**
-- [ ] **Step 2: Verify.** `python3 -m py_compile reframe.py && python3 -m pytest test_spectra6.py -q && ! grep -nE "smbus|AfMode|autofocus|_enable_camera_hdr|epd4in0e\.epdconfig" reframe.py requirements.txt`. Expected: the compile succeeds, all tests pass, and grep prints nothing.
-- [ ] **Step 3: Commit.** `git add -A && git commit -m "feat: Camera v2 settle, rotate_180, GPIO5/6 buttons, no startup photo"`
+- [ ] **Step 2: Verify.** `python3 -m py_compile reframe.py && python3 -m pytest test_spectra6.py -q && ! grep -nE "smbus|epd4in0e\.epdconfig" reframe.py requirements.txt && grep -c "_enable_camera_hdr()" reframe.py`. Expected: the compile succeeds, all tests pass, the first grep prints nothing, and the HDR call is still there.
+- [ ] **Step 3: Commit.** `git add -A && git commit -m "feat: rotate_180, GPIO5/6 buttons, no startup photo"`
 
 ---
 
@@ -512,7 +508,7 @@ Add `import time` to the test imports.
 
 **Files:**
 - Modify: `dashboard.py`:
-  - settings HTML `:1709-1717` (autofocus) and the processing and system sections
+  - settings HTML: the camera, processing and system sections (keep the autofocus select at `:1709-1717`)
   - `populateSettingsForm` `:2474-2510`
   - `saveSettings` `:2601-2650`
   - `resetSettings` `:2669-2710`
@@ -524,7 +520,6 @@ Add `import time` to the test imports.
   - Camera: `rotate-180` (a select, true/false). Help text: "Turn on if the camera is mounted upside down in the case."
   - Processing: `contrast` (number, step 0.05, from 0.3 to 2). Help text: "Below 1 softens contrast before dithering."
   - System: `orientation` (select, landscape/portrait); `portrait-rotation` (select, 90/270), with the help text "Which way is up when you hold it in portrait."; and `slideshow-minutes` (number, 0 to 1440, where 0 = off), saved as `display.slideshow_interval_seconds = minutes * 60`.
-  - Remove the `autofocus-mode` markup, the populate line and the save line.
 - `resetSettings` fetches `/api/settings/defaults`, sets `extensions.arena.access_token_clear = true` and posts it, replacing the hardcoded object.
 
 - [ ] **Step 1: Write the failing test**
@@ -533,9 +528,8 @@ Add `import time` to the test imports.
 def test_dashboard_has_spectra6_controls(dashboard):
     from fastapi.testclient import TestClient
     html = TestClient(dashboard.app).get("/").text
-    for element_id in ("rotate-180", "contrast", "orientation", "portrait-rotation", "slideshow-minutes"):
+    for element_id in ("autofocus-mode", "rotate-180", "contrast", "orientation", "portrait-rotation", "slideshow-minutes"):
         assert f'id="{element_id}"' in html
-    assert "autofocus" not in html
     assert "/api/settings/defaults" in html
 ```
 
@@ -565,13 +559,13 @@ def test_dashboard_has_spectra6_controls(dashboard):
   - The user's home comes from `getent passwd`.
   - `render_unit NAME` runs `sed -e "s|/home/cam/reframe|$REFRAME_REPO|g" -e "s|^User=cam$|User=$REFRAME_USER|" -e "s|^Group=cam$|Group=$REFRAME_GROUP|"` into `/etc/systemd/system/NAME` (mode 0644).
   - It renders the three reframe units.
-  - It drops the RTC, enable_hdr and pisugar lines, and both `timedatectl` lines. NTP is already on, and the timezone stays America/New_York.
+  - It drops the RTC and pisugar lines, and both `timedatectl` lines. It keeps `enable_hdr.sh` in `required_files` and its chmod. NTP is already on, and the timezone stays America/New_York.
   - It keeps the venv/pip step as `runuser -u "$REFRAME_USER"`.
   - `required_files` lists only the files it still installs.
 - `install.sh`:
   - Refuses to run as root. Drops the `cam` user and path checks.
-  - apt installs `git python3-pip python3-venv python3-picamera2 python3-spidev python3-gpiozero python3-lgpio netcat-openbsd`.
-  - Drops `do_i2c`, the PiSugar section, the RTC section and timezone, and the enable_hdr chmod.
+  - apt installs `git python3-pip python3-venv python3-picamera2 python3-spidev python3-gpiozero python3-lgpio netcat-openbsd v4l-utils` (`v4l2-ctl` is what the HDR helper runs).
+  - Drops `do_i2c`, the PiSugar section, and the RTC section and timezone. Keeps the enable_hdr chmod.
   - Keeps SPI, `camera_auto_detect`, the boot trims, groups and the service trims.
   - Writes `/etc/default/reframe`, installs the helper and writes the sudoers rule for `$CURRENT_USER`, then runs `sudo /usr/local/sbin/reframe-apply-update`. That one script now builds the venv and installs the units.
   - Enables only `reframe`, `reframe-dashboard` and `reframe-dashboard-proxy`.
@@ -586,11 +580,12 @@ d=$(mktemp -d); for u in reframe reframe-dashboard reframe-dashboard-proxy; do
   sed -e "s|/home/cam/reframe|/home/youmeandbirdie/reframe|g" -e "s|^User=cam$|User=youmeandbirdie|" -e "s|^Group=cam$|Group=youmeandbirdie|" systemd/$u.service > $d/$u.service; done
 ! grep -n "cam\b\|/home/cam" $d/*.service | grep -v youmeandbirdie
 grep -n "^User=\|^Group=\|ExecStart=" $d/*.service
-! grep -nE "pisugar|rtc|timedatectl|do_i2c|enable_hdr|cam ALL" install.sh scripts/reframe-apply-update
+! grep -nE "pisugar|rtc|timedatectl|do_i2c|cam ALL" install.sh scripts/reframe-apply-update
+grep -n "enable_hdr" install.sh scripts/reframe-apply-update
 ```
 
-  Expected: the syntax checks pass and the negative greps print nothing. The proxy unit keeps `User=root`, and the other two show `User=youmeandbirdie` with paths under `/home/youmeandbirdie/reframe`. Also check by eye that the `sed` in `render_unit` matches the one used here.
-- [ ] **Step 3: Commit.** `git commit -am "feat: installer for any user; drop PiSugar, RTC, UTC and HDR"`
+  Expected: the syntax checks pass, the negative greps print nothing, and the last grep still finds the enable_hdr lines. The proxy unit keeps `User=root`, and the other two show `User=youmeandbirdie` with paths under `/home/youmeandbirdie/reframe`. Also check by eye that the `sed` in `render_unit` matches the one used here.
+- [ ] **Step 3: Commit.** `git commit -am "feat: installer for any user; drop PiSugar, RTC and UTC"`
 
 ---
 
@@ -614,10 +609,11 @@ grep -n "^User=\|^Group=\|ExecStart=" $d/*.service
   - `ping -c2 spectra6-cam.local` (Wi-Fi)
   - `systemctl is-active reframe reframe-dashboard reframe-dashboard-proxy usb-gadget-reconnect tailscaled`
   - `curl -s localhost/api/settings | head -c 300`
-  - Expected: all paths answer, the services are `active` (the gadget oneshot shows `inactive`/exited 0), and settings JSON comes back.
+  - `journalctl -u reframe -b | grep -i hdr`
+  - Expected: all paths answer, the services are `active` (the gadget oneshot shows `inactive`/exited 0), settings JSON comes back, and the log says `HDR enabled on /dev/...`.
 - [ ] **Step 8 (Zeke, one checklist):** Open `http://100.99.67.104/` and report on each item:
   1. Does the panel show *Take your first picture…* reading upright in landscape?
-  2. Press the dashboard's shutter. Does the photo appear in about 20 s, uncropped and round things round?
+  2. Press the dashboard's shutter. Does the photo appear in about 20 s, in focus, uncropped and round things round?
   3. Take 2 more photos. Claude then runs `curl -X POST localhost:8077/api/next` three times, a refresh apart. Does the panel step back twice, then wrap to the newest?
   4. Set orientation to portrait and take a photo. On the Mac, does the gallery copy stand upright? If it's upside down, switch the portrait rotation to 270 and retake.
   5. Set the slideshow to 1 minute. Does it advance about a minute after the last refresh? Then set it back to 0.
