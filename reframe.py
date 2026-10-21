@@ -78,6 +78,7 @@ SAVE_PATH = os.path.join(BASE_PATH, "photos")
 PROCESSED_PATH = os.path.join(BASE_PATH, "dithered_photos")
 RUNTIME_PATH = os.path.join(BASE_PATH, ".runtime")
 DIAGNOSTICS_PATH = os.path.join(RUNTIME_PATH, "diagnostics.json")
+PANEL_STATE_PATH = os.path.join(RUNTIME_PATH, "panel_showing")
 LOG_PATH = os.path.join(RUNTIME_PATH, "reframe.log")
 HDR_HELPER_PATH = os.path.join(BASE_PATH, "scripts", "enable_hdr.sh")
 ORIGINAL_CAPTURE_EXTENSION = "jpg"
@@ -820,10 +821,30 @@ class ImageProcessor:
         This eliminates the redundant img2buffer() conversion by mapping dither
         palette indices directly to hardware nibble indices during the dither step.
         """
-        np = _lazy_import_numpy()
-        Image, _ = _lazy_import_pil()
         import time
         start_time = time.monotonic()
+
+        # Step 1: run the normal dithering to get the palette image
+        dithered_image = ImageProcessor.apply_dithering(
+            image, saturation, brightness_factor, color_factor,
+            dithering_method, bayer_size, threshold_scale, contrast
+        )
+
+        dither_time = time.monotonic()
+
+        display_buffer = ImageProcessor.palette_image_to_buffer(dithered_image)
+
+        buffer_time = time.monotonic()
+        logging.info(f"dither_to_display_buffer: dither={((dither_time - start_time)*1000):.0f}ms, "
+                     f"buffer={((buffer_time - dither_time)*1000):.0f}ms, "
+                     f"total={((buffer_time - start_time)*1000):.0f}ms")
+
+        return display_buffer, dithered_image
+
+    @staticmethod
+    def palette_image_to_buffer(dithered_image):
+        """Pack a dithered palette image (600x400 device coordinates) into a panel buffer."""
+        np = _lazy_import_numpy()
 
         # Mapping from dither palette indices to hardware nibble indices.
         # Dither palette: 0:black, 1:white, 2:yellow, 3:red, 4:black, 5:blue, 6:green
@@ -838,15 +859,6 @@ class ImageProcessor:
         DITHER_TO_HW[5] = 5   # blue   → hw blue
         DITHER_TO_HW[6] = 6   # green  → hw green
 
-        # Step 1: run the normal dithering to get the palette image
-        dithered_image = ImageProcessor.apply_dithering(
-            image, saturation, brightness_factor, color_factor,
-            dithering_method, bayer_size, threshold_scale, contrast
-        )
-
-        dither_time = time.monotonic()
-
-        # Step 2: extract pixel indices and rotate if needed.
         # The processed image is landscape; the current panel expects portrait.
         imwidth, imheight = dithered_image.size
         if (imwidth, imheight) == DISPLAY_IMAGE_SIZE:
@@ -854,21 +866,14 @@ class ImageProcessor:
         elif (imwidth, imheight) == DISPLAY_PANEL_SIZE:
             display_image = dithered_image
         else:
-            logging.warning(f"dither_to_display_buffer: unexpected size {imwidth}x{imheight}")
+            logging.warning(f"palette_image_to_buffer: unexpected size {imwidth}x{imheight}")
             display_image = dithered_image.rotate(90, expand=True)
 
-        # Step 3: map palette indices → hardware nibbles and pack
+        # Map palette indices → hardware nibbles and pack
         src_indices = np.frombuffer(display_image.tobytes('raw'), dtype=np.uint8)
         hw_pixels = DITHER_TO_HW[src_indices]
         buf = (hw_pixels[0::2].astype(np.uint8) << 4) + hw_pixels[1::2].astype(np.uint8)
-        display_buffer = bytearray(buf.astype(np.uint8))
-
-        buffer_time = time.monotonic()
-        logging.info(f"dither_to_display_buffer: dither={((dither_time - start_time)*1000):.0f}ms, "
-                     f"buffer={((buffer_time - dither_time)*1000):.0f}ms, "
-                     f"total={((buffer_time - start_time)*1000):.0f}ms")
-
-        return display_buffer, dithered_image
+        return bytearray(buf.astype(np.uint8))
 
     @staticmethod
     def resize_image(image, size=DISPLAY_IMAGE_SIZE):
@@ -1012,7 +1017,8 @@ class ImageProcessor:
             }
 
     @staticmethod
-    def reprocess_photo_by_id(photo_id, processing_settings, photos_path=SAVE_PATH, output_path=PROCESSED_PATH):
+    def reprocess_photo_by_id(photo_id, processing_settings, photos_path=SAVE_PATH, output_path=PROCESSED_PATH,
+                              rotation=0):
         """Reprocess an existing photo by ID with new settings."""
         # Find the original photo
         original_path = None
@@ -1032,7 +1038,8 @@ class ImageProcessor:
         # Generate output path
         output_file_path = os.path.join(output_path, f"{photo_id}_dithered.png")
 
-        return ImageProcessor.process_photo_with_settings(original_path, output_file_path, processing_settings)
+        return ImageProcessor.process_photo_with_settings(original_path, output_file_path, processing_settings,
+                                                          rotation)
 
 
 def next_photo_id(ids, current):
@@ -1205,7 +1212,7 @@ class FileManager:
 # This class adapts the Waveshare epd4in0e driver to the rest of reFrame.
 # To use another display, keep this public surface compatible:
 # prepare_async(), is_busy(), display_image(), display_buffer(),
-# display_buffer_async(), display_photo_by_id(), clear_display(),
+# display_buffer_async(), clear_display(),
 # display_dashboard_qr(), and sleep().
 #
 # Also update DISPLAY_* constants and the dither palette/mapping in
@@ -1287,34 +1294,29 @@ class EInkDisplay:
         if buffer:
             self.epd.display(buffer, fast_refresh=self._fast_refresh_enabled())
 
-    def display_buffer_async(self, buffer):
-        """Send a pre-built display buffer to the e-ink panel in a background thread.
+    def _refresh_async(self, action, label):
+        """Run one panel refresh in a background thread; False if the panel is busy.
 
         Sets _display_busy=True before starting and clears it when the refresh
-        cycle completes. The caller should check is_busy() before starting a
-        new capture to avoid invisible captures with no feedback.
+        cycle completes, so every refresh blocks the shutter the same way.
         """
-        if not buffer:
-            return
-
         with self._display_lock:
-            # If a previous refresh is somehow still running, log a warning
             if self._display_busy:
-                logging.warning("display_buffer_async: previous refresh still in progress, skipping")
-                return
+                logging.warning("%s skipped: previous refresh still in progress", label)
+                return False
             self._display_busy = True
 
         def _refresh():
             try:
                 self._ensure_initialized()
-                logging.info("Display refresh started (background)")
+                logging.info("%s started (background)", label)
                 refresh_start = time.monotonic()
-                self.epd.display(buffer, fast_refresh=self._fast_refresh_enabled())
+                action(self.epd)
                 refresh_time = time.monotonic() - refresh_start
-                logging.info(f"Display refresh completed in {refresh_time:.1f}s")
-                update_diagnostics("display", activity="Display refresh completed")
+                logging.info(f"{label} completed in {refresh_time:.1f}s")
+                update_diagnostics("display", activity=f"{label} completed")
             except Exception as e:
-                logging.error(f"Display refresh error: {e}")
+                logging.error(f"{label} error: {e}")
                 update_diagnostics(
                     "display",
                     "Display refresh failed. Check the display connection and SPI.",
@@ -1326,81 +1328,32 @@ class EInkDisplay:
 
         self._display_thread = threading.Thread(target=_refresh, daemon=True)
         self._display_thread.start()
+        return True
 
-    def display_photo_by_id(self, photo_id, file_manager, prefer_dithered=True):
-        """Display a photo by ID on the e-ink screen."""
-        try:
-            photo_info = file_manager.get_photo_info(photo_id)
-            if not photo_info:
-                return {
-                    "success": False,
-                    "error": "Photo not found",
-                    "message": f"Could not find photo with ID: {photo_id}"
-                }
-
-            # Choose which version to display
-            if prefer_dithered and photo_info["has_dithered"]:
-                image_path = photo_info["dithered_path"]
-                version = "dithered"
-            else:
-                image_path = photo_info["original_path"]
-                version = "original"
-
-            # Load and display the image
-            Image, ImageEnhance = _lazy_import_pil()
-            image = Image.open(image_path)
-
-            # If displaying original, we need to process it first
-            if version == "original":
-                resized_image = ImageProcessor.resize_image(image)
-                # Use default processing settings for display
-                display_image = ImageProcessor.apply_dithering(resized_image)
-                self.display_image(display_image)
-            else:
-                # Dithered image can be displayed directly (just resize if needed)
-                if image.size != DISPLAY_IMAGE_SIZE:
-                    image = ImageProcessor.resize_image(image)
-                self.display_image(image)
-
-            logging.info(f"Displayed {version} version of photo {photo_id} on e-ink screen")
-
-            return {
-                "success": True,
-                "photo_id": photo_id,
-                "version_displayed": version,
-                "image_path": image_path,
-                "message": f"Photo {photo_id} displayed successfully"
-            }
-
-        except Exception as e:
-            logging.error(f"Error displaying photo {photo_id}: {e}")
-            update_diagnostics("display", "Display refresh failed", "Display refresh failed")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"Failed to display photo {photo_id}: {str(e)}"
-            }
+    def display_buffer_async(self, buffer):
+        """Send a pre-built display buffer to the panel in the background; False if busy."""
+        if not buffer:
+            return False
+        return self._refresh_async(
+            lambda epd: epd.display(buffer, fast_refresh=self._fast_refresh_enabled()),
+            "Display refresh",
+        )
 
     def clear_display(self):
-        """Clear the e-ink display."""
-        self._ensure_initialized()  # Initialize only when first used
-        try:
-            self.epd.Clear(fast_refresh=self._fast_refresh_enabled())
-            logging.info("E-ink display cleared")
-            update_diagnostics("display", activity="Display cleared")
-            return {"success": True, "message": "Display cleared"}
-        except Exception as e:
-            logging.error(f"Error clearing display: {e}")
-            update_diagnostics("display", "Display clear failed", "Display clear failed")
-            return {"success": False, "error": str(e)}
+        """Clear the e-ink display in the background."""
+        if not self._refresh_async(
+            lambda epd: epd.Clear(fast_refresh=self._fast_refresh_enabled()), "Display clear"
+        ):
+            return {"success": False, "error": "display_busy"}
+        return {"success": True, "message": "Display clearing"}
 
-    def display_dashboard_qr(self, access_info):
+    def display_dashboard_qr(self, access_info, rotation=0):
         """Display a QR code that opens the dashboard."""
         try:
-            image = render_dashboard_qr_image(access_info)
-            self.display_image(image)
-            logging.info("Displayed dashboard QR code: %s", access_info.get("primary_url"))
-            update_diagnostics("display", activity="Dashboard QR displayed")
+            buffer = ImageProcessor.img2buffer(render_dashboard_qr_image(access_info, rotation))
+            if not self.display_buffer_async(buffer):
+                return {"success": False, "error": "display_busy"}
+            logging.info("Displaying dashboard QR code: %s", access_info.get("primary_url"))
             return {
                 "success": True,
                 "message": "Dashboard QR displayed",
@@ -1424,10 +1377,13 @@ class EInkDisplay:
 class CameraSystem:
     """Complete camera system that implements dashboard-like functionality."""
 
-    def __init__(self, settings_path="settings.json", eink_display=None):
+    def __init__(self, settings_path="settings.json", eink_display=None, camera_manager=None):
         self.eink_display = eink_display if eink_display is not None else EInkDisplay(settings_path)
-        self.camera_manager = CameraManager(settings_path)
+        self.camera_manager = camera_manager if camera_manager is not None else CameraManager(settings_path)
         self.file_manager = FileManager(SAVE_PATH, PROCESSED_PATH)
+        self.panel_showing = self._read_panel_state()  # photo id, "empty", "qr", "clear" or None
+        self.last_panel_change = time.monotonic()
+        self._save_thread = None
         self.timeout_thread = None
         self.timeout_running = False
         self._timeout_started = False
@@ -1436,6 +1392,68 @@ class CameraSystem:
         self._dashboard_qr_monitor_started = False
         self.dashboard_qr_running = False
         logging.info("Timeout monitor initialization deferred for fast startup")
+
+    @staticmethod
+    def _read_panel_state():
+        try:
+            with open(PANEL_STATE_PATH) as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    def _set_panel_showing(self, value):
+        """Record what the panel shows; it survives restarts so screens are not redrawn."""
+        self.panel_showing = value
+        self.last_panel_change = time.monotonic()
+        try:
+            os.makedirs(os.path.dirname(PANEL_STATE_PATH), exist_ok=True)
+            temp_path = f"{PANEL_STATE_PATH}.tmp"
+            with open(temp_path, "w") as f:
+                f.write(value)
+            os.replace(temp_path, PANEL_STATE_PATH)
+        except OSError as e:
+            logging.warning(f"Could not save panel state: {e}")
+
+    def _display_settings(self):
+        return self.camera_manager.settings.get("display", {})
+
+    def panel_buffer_for(self, photo_id):
+        """Panel buffer for a saved photo, in device coordinates; None if it is missing."""
+        info = self.file_manager.get_photo_info(photo_id)
+        if not info:
+            return None
+        Image, _ = _lazy_import_pil()
+        rotation = self.file_manager.get_rotation(photo_id)
+        if info["dithered_path"]:
+            dithered = to_device(Image.open(info["dithered_path"]), rotation)
+            if dithered.size == DISPLAY_IMAGE_SIZE and dithered.mode == "P":
+                return ImageProcessor.palette_image_to_buffer(dithered)
+        # No usable dithered copy: re-dither the original with the saved settings.
+        original = to_device(Image.open(info["original_path"]), rotation)
+        buffer, _ = ImageProcessor.dither_to_display_buffer(
+            ImageProcessor.resize_image(original),
+            **dither_settings(self.camera_manager.settings.get("processing", {}))
+        )
+        return buffer
+
+    def show_photo(self, photo_id):
+        """Show a saved photo on the panel without blocking."""
+        if self.eink_display.is_busy():
+            return {"success": False, "error": "display_busy"}
+        buffer = self.panel_buffer_for(photo_id)
+        if buffer is None:
+            return {"success": False, "error": "not_found"}
+        if not self.eink_display.display_buffer_async(buffer):
+            return {"success": False, "error": "display_busy"}
+        self._set_panel_showing(photo_id)
+        logging.info(f"Showing photo {photo_id}")
+        return {"success": True, "photo_id": photo_id, "message": f"Showing photo {photo_id}"}
+
+    def clear_display_api(self):
+        result = self.eink_display.clear_display()
+        if result.get("success"):
+            self._set_panel_showing("clear")
+        return result
 
     def start_timeout_monitor(self):
         """Start the background timeout monitoring thread."""
@@ -1508,7 +1526,11 @@ class CameraSystem:
                 "access": access_info
             }
 
-        result = self.eink_display.display_dashboard_qr(access_info)
+        result = self.eink_display.display_dashboard_qr(
+            access_info, orientation_rotation(self._display_settings())
+        )
+        if result.get("success"):
+            self._set_panel_showing("qr")
         return result
 
     def start_dashboard_qr_monitor(self):
@@ -1605,19 +1627,23 @@ class CameraSystem:
                 # Send to display ASAP (async — screen starts blinking immediately)
                 if display_settings.get("auto_display", True):
                     logging.info("Sending to display (async)")
-                    self.eink_display.display_buffer_async(display_buffer)
+                    if self.eink_display.display_buffer_async(display_buffer):
+                        self._set_panel_showing(result["photo_id"])
 
                 display_sent_time = time.monotonic()
                 logging.info(f"Total button-to-display: {((display_sent_time - pipeline_start)*1000):.0f}ms")
 
                 # Save files in background after the display refresh has been dispatched.
                 result["processed_path"] = dithered_path
+                rotation = orientation_rotation(display_settings)
                 def _save_outputs():
                     try:
-                        original_image.save(photo_path, format="JPEG")
+                        # Sidecar first, so a saved file is never read with the wrong rotation.
+                        self.file_manager.set_rotation(result["photo_id"], rotation)
+                        to_saved(original_image, rotation).save(photo_path, format="JPEG")
                         result["file_size"] = os.path.getsize(photo_path)
                         logging.info(f"Original JPEG saved: {photo_path}")
-                        dithered_image.save(dithered_path, format="PNG")
+                        to_saved(dithered_image, rotation).save(dithered_path, format="PNG")
                         logging.info(f"Dithered PNG saved: {dithered_path}")
                         update_diagnostics("storage")
                     except Exception as e:
@@ -1628,8 +1654,8 @@ class CameraSystem:
                             "Photo save failed",
                         )
 
-                save_thread = threading.Thread(target=_save_outputs, daemon=True)
-                save_thread.start()
+                self._save_thread = threading.Thread(target=_save_outputs, daemon=True)
+                self._save_thread.start()
 
             return result
 
@@ -1642,16 +1668,15 @@ class CameraSystem:
                 "message": f"Photo capture failed: {str(e)}"
             }
 
-    def display_photo_api(self, photo_id):
-        """API-style photo display."""
-        return self.eink_display.display_photo_by_id(photo_id, self.file_manager)
 
     def reprocess_photo_api(self, photo_id, processing_settings=None):
         """API-style photo reprocessing."""
         if processing_settings is None:
             processing_settings = self.camera_manager.settings.get("processing", {})
 
-        return ImageProcessor.reprocess_photo_by_id(photo_id, processing_settings)
+        return ImageProcessor.reprocess_photo_by_id(
+            photo_id, processing_settings, rotation=self.file_manager.get_rotation(photo_id)
+        )
 
     def list_photos_api(self):
         """API-style photo listing."""
@@ -1740,6 +1765,15 @@ def _create_fastapi_routes():
             result = camera_system.capture_photo_api()
         return result
 
+    @app.post("/api/display/clear")
+    def api_clear_display():
+        global camera_system
+        if camera_system is None:
+            raise HTTPException(status_code=503, detail="Camera system not initialized")
+        with _operation_lock:
+            return camera_system.clear_display_api()
+
+    # Registered after /api/display/clear so "clear" is never read as a photo id.
     @app.post("/api/display/{photo_id}")
     def api_display(photo_id: str):
         global camera_system
@@ -1748,7 +1782,7 @@ def _create_fastapi_routes():
         try:
             with _operation_lock:
                 camera_system.update_activity()
-                result = camera_system.display_photo_api(photo_id)
+                result = camera_system.show_photo(photo_id)
             return result
         except Exception as e:
             logging.error(f"Error displaying photo {photo_id}: {e}")
@@ -1890,14 +1924,6 @@ def _create_fastapi_routes():
             "remaining_minutes": remaining_minutes,
             "last_activity": time.time() - camera_system.camera_manager.get_inactivity_seconds()
         }
-
-    @app.post("/api/display/clear")
-    def api_clear_display():
-        global camera_system
-        if camera_system is None:
-            raise HTTPException(status_code=503, detail="Camera system not initialized")
-        with _operation_lock:
-            return camera_system.eink_display.clear_display()
 
     return app
 

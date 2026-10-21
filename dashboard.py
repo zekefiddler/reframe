@@ -1989,7 +1989,7 @@ async def dashboard():
                     const resp = await fetch('/api/display/clear', { method: 'POST' });
                     if (!resp.ok) throw new Error(await resp.text());
                     const data = await resp.json();
-                    alert(data.message || 'screen cleared');
+                    alert(data.success ? (data.message || 'screen cleared') : 'The screen is refreshing. Try again when it finishes.');
                 } catch (error) {
                     console.error('Error clearing screen:', error);
                     alert('failed to clear screen');
@@ -2261,7 +2261,9 @@ async def dashboard():
                     
                     if (response.ok) {
                         const result = await response.json();
-                        alert(result.message);
+                        alert(result.success ? result.message
+                            : result.error === 'display_busy' ? 'The screen is refreshing. Try again when it finishes.'
+                            : `Error: ${result.error || result.message}`);
                     } else {
                         const error = await response.json();
                         alert(`Error: ${error.detail}`);

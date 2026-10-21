@@ -139,3 +139,97 @@ def test_rotation_sidecar(tmp_path):
     assert fm.photo_ids() == ["00000"] and len(fm.list_all_photos()) == 1
     fm.delete_photo("00000")
     assert not (tmp_path / "p" / "00000.json").exists()
+
+
+class FakeEPD:
+    def __init__(self): self.frames = []
+    def display(self, buf, fast_refresh=False): self.frames.append(bytes(buf))
+    def Clear(self, color=0x11, fast_refresh=False): self.frames.append("clear")
+    def sleep(self): pass
+
+
+class FakeCamera:
+    def __init__(self): self.settings = merge_defaults({})
+    def capture_image_with_metadata(self, path, fast_mode=False):
+        img = Image.new("RGB", (1200, 800), (40, 90, 160)); img.paste((255, 0, 0), (0, 0, 200, 120))
+        pid = os.path.splitext(os.path.basename(path))[0]
+        return {"success": True, "photo_id": pid, "original_path": path, "processed_path": None}, img
+    def update_activity_time(self): pass
+    def is_timeout_enabled(self): return False
+
+
+@pytest.fixture
+def system(tmp_path, monkeypatch):
+    monkeypatch.setattr(reframe, "SAVE_PATH", str(tmp_path / "photos"))
+    monkeypatch.setattr(reframe, "PROCESSED_PATH", str(tmp_path / "dithered"))
+    monkeypatch.setattr(reframe, "PANEL_STATE_PATH", str(tmp_path / "panel_showing"))
+    return make_system(tmp_path)
+
+
+def make_system(tmp_path):
+    display = reframe.EInkDisplay(str(tmp_path / "settings.json"))
+    display.epd, display._initialized = FakeEPD(), True
+    return reframe.CameraSystem(eink_display=display, camera_manager=FakeCamera())
+
+
+def settle(s):
+    for t in (getattr(s, "_save_thread", None), s.eink_display._display_thread):
+        if t: t.join(10)
+
+
+def frames(s): return s.eink_display.epd.frames
+
+
+def snap(s, orientation="landscape"):
+    s.camera_manager.settings["display"]["orientation"] = orientation
+    pid = s.capture_photo_api()["photo_id"]; settle(s); return pid
+
+
+def test_portrait_rotates_files_not_panel(system):
+    a = snap(system); b = snap(system, "portrait")
+    assert frames(system)[0] == frames(system)[1]
+    assert Image.open(os.path.join(reframe.SAVE_PATH, f"{b}.jpg")).size == (800, 1200)
+    assert Image.open(os.path.join(reframe.PROCESSED_PATH, f"{b}_dithered.png")).size == (400, 600)
+    assert system.file_manager.get_rotation(a) == 0 and system.file_manager.get_rotation(b) == 90
+    assert system.panel_showing == b
+
+
+def test_mixed_orientations_show_like_capture(system):
+    a = snap(system); b = snap(system, "portrait")
+    system.camera_manager.settings["display"]["orientation"] = "landscape"
+    for pid, captured in ((a, frames(system)[0]), (b, frames(system)[1])):
+        assert system.show_photo(pid)["success"]; settle(system)
+        assert frames(system)[-1] == captured
+
+
+def test_show_photo_redithers_with_saved_settings(system):
+    pid = snap(system)
+    os.remove(os.path.join(reframe.PROCESSED_PATH, f"{pid}_dithered.png"))
+    saved = {"saturation": 0.3, "contrast": 1.0}
+    system.camera_manager.settings["processing"].update(saved)
+    system.show_photo(pid); settle(system)
+    original = reframe.ImageProcessor.resize_image(Image.open(os.path.join(reframe.SAVE_PATH, f"{pid}.jpg")))
+    expected, _ = reframe.ImageProcessor.dither_to_display_buffer(original, **reframe.dither_settings(saved))
+    default, _ = reframe.ImageProcessor.dither_to_display_buffer(original, **reframe.dither_settings({}))
+    assert frames(system)[-1] == bytes(expected) != bytes(default)
+
+
+def test_show_photo_ignored_while_busy(system):
+    pid = snap(system); before = list(frames(system))
+    system.eink_display._display_busy = True
+    assert system.show_photo(pid) == {"success": False, "error": "display_busy"}
+    assert frames(system) == before
+
+
+def test_clear_is_async_and_sets_busy(system):
+    gate = threading.Event()
+    system.eink_display.epd.Clear = lambda **kw: gate.wait(5)
+    assert system.eink_display.clear_display()["success"]
+    assert system.eink_display.is_busy()
+    gate.set(); settle(system)
+    assert not system.eink_display.is_busy()
+
+
+def test_clear_route_not_shadowed_by_photo_route():
+    paths = [r.path for r in reframe._create_fastapi_routes().routes]
+    assert paths.index("/api/display/clear") < paths.index("/api/display/{photo_id}")
