@@ -19,7 +19,7 @@ need.
 | | reFrame upstream | spectra6-cam |
 |---|---|---|
 | Pi | Zero 2 W | Zero 2 W, hostname `spectra6-cam`, user **`youmeandbirdie`** (sudo asks for a password) |
-| Panel | Waveshare 4" HAT+ (E) | same, mounted on the GPIO header, SPI on, test pattern OK |
+| Panel | Waveshare 4" HAT+ (E) | same, but **off the header, on its 9-wire cable** (same pins: RST17, DC25, CS8, BUSY24, PWR18), so the header is free for buttons; test pattern OK (2026-10-21) |
 | Camera | Module 3 (autofocus, HDR) | same, **Module 3, imx708** (swapped in for the v2 on 2026-10-21; test still OK) |
 | Power and button | PiSugar 3, button read over I2C 0x57, RTC | **Geekworm X306** UPS (no I2C, no RTC). **Two GPIO buttons:** shutter **GPIO5**, next **GPIO6**, both to GND |
 | Network | Wi-Fi | Wi-Fi, **Tailscale**, and a **USB gadget** (dwc2/g_ether in cmdline, NM `netplan-usb0` at 10.55.2.1/16, `usb-gadget-reconnect.service`). None of these may be disturbed. |
