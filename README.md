@@ -77,7 +77,7 @@ reframe/
 ├── dashboard.py               # web dashboard for photo management
 ├── dashboard_proxy.py         # local port 80 dashboard proxy
 ├── install.sh                 # one-command setup script
-├── settings.example.json      # default configuration
+├── settings_defaults.py       # default configuration
 ├── scripts/                   # hardware and privileged system helpers
 │   ├── enable_hdr.sh
 │   ├── reframe-apply-update

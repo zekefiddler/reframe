@@ -24,6 +24,8 @@ from picamera2 import Picamera2
 
 from typing import Optional, Dict, Any
 
+from settings_defaults import merge_defaults
+
 np = None
 
 def _lazy_import_numpy():
@@ -338,40 +340,13 @@ class CameraManager:
         self.configure_camera()
 
     def load_settings(self):
-        """Load camera settings from JSON file."""
+        """Load camera settings from JSON file, filled in from the shared defaults."""
         try:
             with open(self.settings_path, 'r') as f:
-                return json.load(f)
+                return merge_defaults(json.load(f))
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logging.warning(f"Could not load settings from {self.settings_path}: {e}")
-            # Return default settings
-            return {
-                "camera": {
-                    "resolution": {"width": 1200, "height": 800},
-                    "exposure_value": 0,
-                    "sharpness": 3,
-                    "autofocus_mode": 2
-                },
-                "processing": {
-                    "saturation": 0.6,
-                    "brightness_factor": 1.1,
-                    "color_factor": 1.4,
-                    "dithering_method": "floyd_steinberg",
-                    "bayer_size": 4,
-                    "threshold_scale": 1.0
-                },
-                "display": {
-                    "auto_display": True,
-                    "display_timeout": 0,
-                    "fast_refresh": False
-                },
-                "system": {
-                    "auto_refresh_interval": 30,
-                    "auto_timeout_minutes": 10,
-                    "auto_timeout_enabled": True,
-                    "show_dashboard_qr_on_wifi_connect": True
-                }
-            }
+            return merge_defaults({})
 
     def reload_settings(self):
         """Reload settings from file and reconfigure camera."""

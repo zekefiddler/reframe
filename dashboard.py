@@ -20,6 +20,8 @@ from starlette.background import BackgroundTask
 import httpx
 from PIL import Image
 
+from settings_defaults import merge_defaults
+
 CAMERA_AVAILABLE = False
 
 # Constants
@@ -186,11 +188,13 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     number(camera.get("sharpness"), "camera.sharpness", 0, 10)
     if camera.get("autofocus_mode") not in {0, 1, 2}:
         raise SettingsValidationError("camera.autofocus_mode must be 0, 1, or 2")
+    boolean(camera.get("rotate_180"), "camera.rotate_180")
 
     processing = section(settings, "processing", "processing")
     number(processing.get("saturation"), "processing.saturation", 0, 2)
     number(processing.get("brightness_factor"), "processing.brightness_factor", 0.1, 3)
     number(processing.get("color_factor"), "processing.color_factor", 0.1, 3)
+    number(processing.get("contrast"), "processing.contrast", 0.3, 2)
     if processing.get("dithering_method") not in {"floyd_steinberg", "ordered"}:
         raise SettingsValidationError("processing.dithering_method is unsupported")
     if processing.get("bayer_size") not in {2, 4, 8}:
@@ -201,6 +205,11 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     boolean(display.get("auto_display"), "display.auto_display")
     number(display.get("display_timeout"), "display.display_timeout", 0, 3600)
     boolean(display.get("fast_refresh", False), "display.fast_refresh")
+    if display.get("orientation") not in {"landscape", "portrait"}:
+        raise SettingsValidationError("display.orientation must be landscape or portrait")
+    if display.get("portrait_rotation") not in {90, 270}:
+        raise SettingsValidationError("display.portrait_rotation must be 90 or 270")
+    integer(display.get("slideshow_interval_seconds"), "display.slideshow_interval_seconds", 0, 86400)
 
     system = section(settings, "system", "system")
     integer(system.get("auto_refresh_interval"), "system.auto_refresh_interval", 5, 300)
@@ -223,44 +232,7 @@ class SettingsManager:
     
     def __init__(self, settings_path: str = SETTINGS_PATH):
         self.settings_path = Path(settings_path)
-        self.default_settings = {
-            "camera": {
-                "resolution": {"width": 1200, "height": 800},
-                "exposure_value": 0,
-                "sharpness": 3,
-                "autofocus_mode": 2
-            },
-            "processing": {
-                "saturation": 0.6,
-                "brightness_factor": 1.1,
-                "color_factor": 1.4,
-                "dithering_method": "floyd_steinberg",
-                "bayer_size": 4,
-                "threshold_scale": 1.0
-            },
-            "display": {
-                "auto_display": True,
-                "display_timeout": 0,
-                "fast_refresh": False
-            },
-            "system": {
-                "auto_refresh_interval": 30,
-                "auto_timeout_minutes": 10,
-                "auto_timeout_enabled": True,
-                "show_dashboard_qr_on_wifi_connect": True,
-                "camera_name": ""
-            },
-            "exports": {
-                "upscale_dithered_2x": False
-            },
-            "extensions": {
-                "arena": {
-                    "enabled": False,
-                    "channel": "",
-                    "access_token": ""
-                }
-            }
-        }
+        self.default_settings = merge_defaults({})
         self._ensure_settings_file()
     
     def _ensure_settings_file(self):
@@ -276,7 +248,7 @@ class SettingsManager:
             # Ensure all default keys exist
             return self._merge_with_defaults(settings)
         except (FileNotFoundError, json.JSONDecodeError):
-            return self.default_settings.copy()
+            return merge_defaults({})
 
     def load_public_settings(self) -> Dict[str, Any]:
         """Load settings safe to return to the browser."""
@@ -335,7 +307,7 @@ class SettingsManager:
             legacy_value = system_settings.pop("show_dashboard_qr_on_first_network", None)
             if "show_dashboard_qr_on_wifi_connect" not in system_settings and legacy_value is not None:
                 system_settings["show_dashboard_qr_on_wifi_connect"] = legacy_value
-        return self._deep_merge(self.default_settings.copy(), settings)
+        return merge_defaults(settings)
     
     def _deep_merge(self, default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
         """Deep merge two dictionaries."""
@@ -3339,6 +3311,12 @@ async def download_dithered_photo(filename: str):
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{export_filename}"'}
     )
+
+@app.get("/api/settings/defaults")
+async def get_default_settings():
+    """Get the default settings (used by the reset button)."""
+    return merge_defaults({})
+
 
 @app.get("/api/settings")
 async def get_settings():

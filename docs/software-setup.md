@@ -258,9 +258,7 @@ Log out and back in for changes to take effect.
 
 ### Configuration
 
-```bash
-cp settings.example.json settings.json
-```
+No step needed: the dashboard writes `settings.json` from `settings_defaults.py` on first start.
 
 ### Systemd Services
 

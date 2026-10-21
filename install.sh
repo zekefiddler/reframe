@@ -211,13 +211,6 @@ info "Added $USER to hardware groups (video, i2c, spi, gpio)"
 # ── 7. Configuration ────────────────────────
 step "Setting up configuration"
 
-if [ ! -f "$SCRIPT_DIR/settings.json" ]; then
-    cp "$SCRIPT_DIR/settings.example.json" "$SCRIPT_DIR/settings.json"
-    info "Created settings.json from example"
-else
-    info "settings.json already exists, skipping"
-fi
-
 # Create photo directories
 mkdir -p "$SCRIPT_DIR/photos"
 mkdir -p "$SCRIPT_DIR/dithered_photos"
