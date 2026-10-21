@@ -282,3 +282,40 @@ def test_delete_all_ends_on_empty_roll(system):
     system.eink_display._display_busy = False
     assert system.panel_tick(time.monotonic()); settle(system)
     assert system.panel_showing == "empty"
+
+
+def test_shutter_press_ignored_while_busy(system):
+    system.eink_display._display_busy = True
+    assert reframe.handle_button_press(system, "shutter")["error"] == "display_busy"
+    assert system.file_manager.photo_ids() == [] and frames(system) == []
+
+
+def test_shutter_and_next_presses(system):
+    reframe.handle_button_press(system, "shutter"); settle(system)
+    first = system.panel_showing
+    reframe.handle_button_press(system, "shutter"); settle(system)
+    assert system.panel_showing != first
+    reframe.handle_button_press(system, "next"); settle(system)
+    assert system.panel_showing == first
+
+
+class FakePicam:
+    def __init__(self): self.configs = []
+    def stop(self): pass
+    def start(self): pass
+    def set_controls(self, controls): pass
+    def configure(self, config): pass
+    def create_still_configuration(self, **kwargs):
+        self.configs.append(kwargs); return {}
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_rotate_180_sets_camera_transform(monkeypatch, flip):
+    class Transform:
+        def __init__(self, hflip=0, vflip=0): self.flips = (hflip, vflip)
+    monkeypatch.setitem(sys.modules, "libcamera", types.SimpleNamespace(Transform=Transform))
+    cm = object.__new__(reframe.CameraManager)
+    cm.settings = merge_defaults({"camera": {"rotate_180": flip}}); cm.picam2 = FakePicam()
+    cm.configure_camera()
+    transform = cm.picam2.configs[0].get("transform")
+    assert (transform.flips == (1, 1)) if flip else transform is None

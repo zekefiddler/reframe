@@ -90,6 +90,10 @@ DISPLAY_IMAGE_SIZE = (DISPLAY_IMAGE_WIDTH, DISPLAY_IMAGE_HEIGHT)
 DISPLAY_PANEL_SIZE = (DISPLAY_PANEL_WIDTH, DISPLAY_PANEL_HEIGHT)
 EMPTY_ROLL_TEXT = "Take your first picture and wait for it to appear on the screen."
 BUTTON_POLL_INTERVAL_SECONDS = 0.025
+# HARDWARE: Buttons — momentary switches from each pin to GND (internal pull-ups)
+SHUTTER_PIN = 5   # header pin 29
+NEXT_PIN = 6      # header pin 31
+BUTTON_DEBOUNCE_SECONDS = 0.3
 
 os.makedirs(RUNTIME_PATH, exist_ok=True)
 _log_handlers = [logging.StreamHandler()]
@@ -155,9 +159,9 @@ def record_service_failure(error):
             "Camera not detected. Check that the ribbon cable is fully seated "
             "and facing the correct direction at both ends."
         )
-    elif any(marker in lowered for marker in ("i2c", "smbus", "/dev/i2c")):
+    elif any(marker in lowered for marker in ("gpiozero", "lgpio")):
         component = "button"
-        message = "Shutter button hardware is unavailable. Check the PiSugar connection and I2C."
+        message = "Buttons unavailable. Check the shutter (GPIO5) and next (GPIO6) wiring."
     elif any(marker in lowered for marker in ("spi", "epd", "e-ink", "eink")):
         component = "display"
         message = "Display hardware failed to initialize. Check the display connection and SPI."
@@ -508,9 +512,13 @@ class CameraManager:
         except Exception:
             pass
 
-        camera_config = self.picam2.create_still_configuration(
-            main={"size": (resolution["width"], resolution["height"])}
-        )
+        still_options = {"main": {"size": (resolution["width"], resolution["height"])}}
+        if camera_settings.get("rotate_180"):
+            # For a camera mounted upside down in the case.
+            from libcamera import Transform
+            still_options["transform"] = Transform(hflip=1, vflip=1)
+
+        camera_config = self.picam2.create_still_configuration(**still_options)
 
         # Build controls dictionary from settings
         controls = {
@@ -526,9 +534,7 @@ class CameraManager:
         except Exception as e:
             logging.error(f"Error configuring camera: {e}")
             # Try with basic configuration without custom controls
-            basic_config = self.picam2.create_still_configuration(
-                main={"size": (resolution["width"], resolution["height"])}
-            )
+            basic_config = self.picam2.create_still_configuration(**still_options)
             self.picam2.configure(basic_config)
             logging.info("Using basic camera configuration")
 
@@ -1797,6 +1803,22 @@ class CameraSystem:
 camera_system: Optional[CameraSystem] = None
 _operation_lock = threading.Lock()
 
+
+def handle_button_press(camera_system, button):
+    """Act on one press of the shutter or next button."""
+    if camera_system.eink_display.is_busy():
+        logging.info("%s press ignored: display busy", button)
+        update_diagnostics(activity="Button press ignored while the display was refreshing")
+        return {"success": False, "error": "display_busy"}
+    with _operation_lock:
+        camera_system.update_activity()
+        if button == "next":
+            return camera_system.next_photo()
+        result = camera_system.capture_photo_api()
+    if not result.get("success"):
+        logging.error("Capture failed: %s", result.get("message", "unknown error"))
+    return result
+
 # FastAPI application exposing hardware control over localhost (lazy initialized)
 app = None  # Will be created when API server starts
 
@@ -2022,76 +2044,11 @@ def main():
     _enable_camera_hdr()
     camera_system = CameraSystem(eink_display=startup_display)
     logging.info("Camera system initialized")
-    logging.info("Taking startup photo...")
-    startup_status = "Camera initialized; startup capture failed"
-    try:
-        with _operation_lock:
-            result = camera_system.capture_photo_api(fast_mode=True)
-
-        if result.get("success"):
-            logging.info("Startup photo captured: %s", result.get("photo_id", "unknown"))
-            if camera_system.camera_manager.settings.get("display", {}).get("auto_display", True):
-                logging.info("Startup photo sent to display")
-            logging.info("System ready")
-            startup_status = "Startup photo dispatched"
-
-            # Ensure activity time is updated before starting timeout monitor
-            camera_system.update_activity()
-            camera_system.start_timeout_monitor_deferred()
-        else:
-            logging.warning("Failed to capture startup photo: %s", result.get("message", "unknown error"))
-    except Exception as e:
-        logging.error("Error taking startup photo: %s", e)
-    finally:
-        # reframe.service is Type=notify. Dashboard startup waits for this, but
-        # does not wait for the e-ink panel's long physical refresh.
-        _notify_systemd_ready(startup_status)
-
-    # ═══════════════════════════════════════════════════════════════
-    # HARDWARE: Button — PiSugar 3 via I2C
-    # The PiSugar 3 exposes a button register at I2C address 0x57.
-    # This is a direct hardware read (no PiSugar library needed).
-    # To use a different button/trigger, replace is_power_button_pressed().
-    # Long press (≥2s) is ignored here — PiSugar handles shutdown natively.
-    # See: https://github.com/PiSugar/PiSugar/wiki/PiSugar-3-I2C-Datasheet
-    # ═══════════════════════════════════════════════════════════════
-    I2C_ADDRESS = 0x57
-    BUTTON_REGISTER = 0x02
-    import smbus2
-    bus = smbus2.SMBus(1)
-    button_read_healthy = None
-    last_button_error_log = 0.0
-
-    def is_power_button_pressed():
-        nonlocal button_read_healthy, last_button_error_log
-        try:
-            reg_val = bus.read_byte_data(I2C_ADDRESS, BUTTON_REGISTER)
-            if button_read_healthy is not True:
-                if button_read_healthy is False:
-                    logging.info("Shutter button I2C connection recovered")
-                    update_diagnostics(
-                        "button",
-                        activity="Shutter button connection recovered",
-                    )
-            button_read_healthy = True
-            return bool(reg_val & 0x01)  # Check the least significant bit
-        except Exception as e:
-            now = time.monotonic()
-            if button_read_healthy is not False:
-                update_diagnostics(
-                    "button",
-                    "Shutter button is not responding. Check the PiSugar connection and I2C.",
-                    "Shutter button stopped responding",
-                )
-            if button_read_healthy is not False or now - last_button_error_log >= 60:
-                logging.error("Failed to read shutter button over I2C: %s", e)
-                last_button_error_log = now
-            button_read_healthy = False
-            return False
-
-    prev_state = False
-    button_press_start_time = None
-    LONG_PRESS_THRESHOLD = 2.0  # 2 seconds threshold for long press
+    # No startup photo: the panel keeps showing the last photo across restarts.
+    camera_system.update_activity()
+    camera_system.start_timeout_monitor_deferred()
+    # reframe.service is Type=notify. Dashboard startup waits for this.
+    _notify_systemd_ready("Camera ready")
 
     # Start API server in background
     try:
@@ -2100,55 +2057,39 @@ def main():
         port = 8077
     _start_api_server_in_background(host="127.0.0.1", port=port)
     camera_system.start_dashboard_qr_monitor()
+    camera_system.start_panel_ticker()
 
-    logging.info("System initialized. API server running. Waiting for button press to capture photo...")
-    logging.info(f"Button protection: Long press (>={LONG_PRESS_THRESHOLD}s) will not trigger photo capture")
+    # ═══════════════════════════════════════════════════════════════
+    # HARDWARE: Buttons — shutter on GPIO5, next on GPIO6, each to GND.
+    # Polled on the press edge; a press while the panel refreshes is ignored.
+    # ═══════════════════════════════════════════════════════════════
+    from gpiozero import Button
+    buttons = {
+        "shutter": Button(SHUTTER_PIN, pull_up=True),
+        "next": Button(NEXT_PIN, pull_up=True),
+    }
+    was_pressed = {name: False for name in buttons}
+    last_press = {name: 0.0 for name in buttons}
+
+    logging.info("System initialized. API server running. Waiting for button presses...")
 
     try:
         while True:
-            current_state = is_power_button_pressed()
-
-            # Button press started
-            if current_state and not prev_state:
-                button_press_start_time = time.monotonic()
-                logging.info("Button pressed - monitoring for long press protection...")
-                update_diagnostics(activity="Button press detected")
-
-            # Button released
-            elif not current_state and prev_state:
-                if button_press_start_time is not None:
-                    press_duration = time.monotonic() - button_press_start_time
-
-                    if press_duration < LONG_PRESS_THRESHOLD:
-                        # Block captures while display is mid-refresh to avoid
-                        # invisible captures with no visual feedback
-                        if camera_system.eink_display.is_busy():
-                            logging.info(f"Short press detected ({press_duration:.1f}s) - display busy, ignoring")
-                            update_diagnostics(
-                                activity="Button press ignored while the display was refreshing",
-                            )
-                        else:
-                            logging.info(f"Short press detected ({press_duration:.1f}s) - capturing photo...")
-                            with _operation_lock:
-                                result = camera_system.capture_photo_api()
-                            if result.get("success"):
-                                logging.info("Photo captured%s.", " and sent to display" if camera_system.camera_manager.settings.get("display", {}).get("auto_display", True) else "")
-                            else:
-                                logging.error("Capture failed: %s", result.get("message", "unknown error"))
-                    else:
-                        logging.info(f"Long press detected ({press_duration:.1f}s) - ignoring for photo capture")
-                        update_diagnostics(
-                            activity="Long press detected; no photo capture was requested",
-                        )
-
-                    button_press_start_time = None
-
-            prev_state = current_state
+            for name, button in buttons.items():
+                pressed = button.is_pressed
+                now = time.monotonic()
+                if pressed and not was_pressed[name] and now - last_press[name] >= BUTTON_DEBOUNCE_SECONDS:
+                    last_press[name] = now
+                    logging.info("%s button pressed", name)
+                    update_diagnostics(activity=f"{name.capitalize()} button pressed")
+                    handle_button_press(camera_system, name)
+                was_pressed[name] = pressed
             sleep(BUTTON_POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logging.info("Program interrupted by user. Exiting...")
     finally:
-        bus.close()
+        for button in buttons.values():
+            button.close()
         try:
             # Stop timeout monitor and put display to sleep if initialized inside CameraSystem
             if camera_system:
@@ -2186,7 +2127,7 @@ def demo_api_usage():
         print(f"Reprocessing result: {reprocess_result['success']}")
 
         print("\n=== Displaying Photo ===")
-        display_result = camera_system.display_photo_api(photo_id)
+        display_result = camera_system.show_photo(photo_id)
         print(f"Display result: {display_result['success']}")
 
     print("\n=== Listing All Photos ===")
@@ -2213,7 +2154,6 @@ if __name__ == "__main__":
             main()
         except KeyboardInterrupt:
             logging.info("Program interrupted. Exiting...")
-            epd4in0e.epdconfig.module_exit(cleanup=True)
         except Exception as error:
             logging.exception("Camera service stopped unexpectedly")
             record_service_failure(error)

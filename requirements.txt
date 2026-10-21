@@ -1,6 +1,5 @@
 pillow
 numpy
-smbus2
 fastapi
 uvicorn
 aiofiles
