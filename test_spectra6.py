@@ -359,3 +359,49 @@ def test_failed_refresh_is_redrawn_after_restart(system, tmp_path):
     restarted = make_system(tmp_path)
     assert restarted.panel_tick(time.monotonic()); settle(restarted)
     assert restarted.panel_showing == "empty"
+
+
+def test_reused_id_ignores_stale_rotation_sidecar(system, tmp_path):
+    system.file_manager.set_rotation("00000", 90)       # portrait save died after the sidecar
+    restarted = make_system(tmp_path)
+    pid = snap(restarted)                               # landscape, reuses 00000
+    assert pid == "00000" and restarted.file_manager.get_rotation(pid) == 0
+    captured = frames(restarted)[-1]
+    restarted.show_photo(pid); settle(restarted)
+    assert frames(restarted)[-1] == captured
+
+
+def test_reprocess_keeps_portrait_upright(system):
+    pid = snap(system, "portrait")
+    assert system.reprocess_photo_api(pid, {"saturation": 0.4})["success"]
+    png = Image.open(os.path.join(reframe.PROCESSED_PATH, f"{pid}_dithered.png"))
+    assert png.size == (400, 600) and png.mode == "P"
+    system.show_photo(pid); settle(system)                  # panel uses the reprocessed PNG, back in device coords
+    assert frames(system)[-1] == bytes(reframe.ImageProcessor.palette_image_to_buffer(reframe.to_device(png, 90)))
+
+
+def test_failed_refresh_backs_off_before_retrying(system):
+    def broken(buf, fast_refresh=False): raise OSError("SPI write failed")
+    system.eink_display.epd.display = broken
+    now = time.monotonic()
+    assert system.panel_tick(now); settle(system)
+    assert not system.panel_tick(now + 1)                 # no retry storm against a dead panel
+    assert system.panel_tick(now + reframe.REFRESH_RETRY_SECONDS + 1)
+
+
+def test_next_skips_a_photo_it_cannot_find(system, monkeypatch):
+    p1 = snap(system)
+    Image.new("RGB", (8, 8)).save(os.path.join(reframe.SAVE_PATH, "00005.jpg"))
+    lookup = system.file_manager.get_photo_info
+    monkeypatch.setattr(system.file_manager, "get_photo_info",            # listed, gone by lookup
+                        lambda pid: None if pid == "00005" else lookup(pid))
+    assert system.next_photo()["success"]; settle(system)
+    assert system.panel_showing == p1
+
+
+def test_truncated_png_falls_back_to_the_original(system):
+    pid = snap(system)
+    with open(os.path.join(reframe.PROCESSED_PATH, f"{pid}_dithered.png"), "r+b") as f:
+        f.truncate(100)                                                 # power cut while saving the PNG
+    assert system.show_photo(pid)["success"]; settle(system)
+    assert system.panel_showing == pid

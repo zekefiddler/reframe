@@ -9,6 +9,9 @@ REFRAME_REPO="/home/cam/reframe"
 if [ -f /etc/default/reframe ]; then
     # shellcheck source=/dev/null
     . /etc/default/reframe
+    echo "Using /etc/default/reframe: user $REFRAME_USER, repo $REFRAME_REPO"
+else
+    echo "No /etc/default/reframe; using the default cam user and /home/cam/reframe"
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -24,7 +27,7 @@ if ! [[ "$REFRAME_REPO" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
     echo "Invalid REFRAME_REPO in /etc/default/reframe" >&2
     exit 1
 fi
-REFRAME_HOME="$(getent passwd "$REFRAME_USER" | cut -d: -f6)"
+REFRAME_HOME="$(getent passwd "$REFRAME_USER" | cut -d: -f6 || true)"
 if [ -z "$REFRAME_HOME" ]; then
     echo "User $REFRAME_USER does not exist" >&2
     exit 1

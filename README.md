@@ -57,12 +57,12 @@ chmod +x install.sh
 
   <img src="docs/images/reframe.gif" alt="reFrame ePaper camera in action" width="720" />
 
-reFrame is extremely minimalist by design. It has only a single button; no viewfinder, flash or zoom.
+reFrame is extremely minimalist by design. This build has two buttons, shutter and next; no viewfinder, flash or zoom.
 
-1. Press the combined power + shutter button to wake the camera and take a photo.
+1. Press the shutter to take a photo. With no photos yet, the screen says so.
 2. The original image is saved, then dithered to a 6-color palette to match the screen. The processed image is sent to the ePaper display.
-3. The ePaper screen takes about 20 seconds to display the photo.
-4. Press the button again to take a new photo. It'll replace the previous one on the display.
+3. The ePaper screen takes about 20–35 seconds to display the photo. Presses during a refresh are ignored.
+4. Press next to step back through older photos; it wraps to the newest. A slideshow setting can do this automatically.
 5. When you turn the camera off, the last photo will stay on the screen.
 
 A web dashboard, accessible over the local network, lets you browse photos, download originals, change the displayed image, adjust camera settings, and optionally upload dithered photos to Are.na.

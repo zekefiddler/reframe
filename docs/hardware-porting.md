@@ -10,7 +10,7 @@ To port another e-ink display:
 
 - Update `DISPLAY_IMAGE_WIDTH`, `DISPLAY_IMAGE_HEIGHT`, `DISPLAY_PANEL_WIDTH`, and `DISPLAY_PANEL_HEIGHT`.
 - Update the palettes and hardware color mapping in `ImageProcessor`.
-- Keep `EInkDisplay`'s public methods compatible: `prepare_async`, `is_busy`, `display_image`, `display_buffer`, `display_buffer_async`, `display_photo_by_id`, `clear_display`, `display_dashboard_qr`, and `sleep`.
+- Keep `EInkDisplay`'s public methods compatible: `prepare_async`, `is_busy`, `display_image`, `display_buffer`, `display_buffer_async(buffer, on_done)`, `clear_display(on_done)`, `display_dashboard_qr(access_info, rotation, on_done)`, and `sleep`. The async methods return False (or `{"error": "display_busy"}`) while a refresh is running, and call `on_done` only after a refresh completes.
 
 You can find similar E Ink Spectra 6 displays from other brands like Pimoroni, GooDisplay, etc.
 

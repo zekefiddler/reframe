@@ -94,6 +94,7 @@ BUTTON_POLL_INTERVAL_SECONDS = 0.025
 SHUTTER_PIN = 5   # header pin 29
 NEXT_PIN = 6      # header pin 31
 BUTTON_DEBOUNCE_SECONDS = 0.3
+REFRESH_RETRY_SECONDS = 60  # after a failed refresh, the ticker waits this long before retrying
 
 os.makedirs(RUNTIME_PATH, exist_ok=True)
 _log_handlers = [logging.StreamHandler()]
@@ -265,7 +266,7 @@ def _enable_camera_hdr():
 
 
 def _notify_systemd_ready(status):
-    """Tell systemd startup capture dispatch is complete."""
+    """Tell systemd the camera service has finished starting (Type=notify READY=1)."""
     notify_socket = os.environ.get("NOTIFY_SOCKET")
     if not notify_socket:
         return
@@ -830,7 +831,7 @@ class ImageProcessor:
         import time
         start_time = time.monotonic()
 
-        # Step 1: run the normal dithering to get the palette image
+        # Dither to the palette image, then pack it for the panel
         dithered_image = ImageProcessor.apply_dithering(
             image, saturation, brightness_factor, color_factor,
             dithering_method, bayer_size, threshold_scale, contrast
@@ -849,7 +850,7 @@ class ImageProcessor:
 
     @staticmethod
     def palette_image_to_buffer(dithered_image):
-        """Pack a dithered palette image (600x400 device coordinates) into a panel buffer."""
+        """Pack a dithered palette image (600x400 landscape or 400x600 panel) into a panel buffer."""
         np = _lazy_import_numpy()
 
         # Mapping from dither palette indices to hardware nibble indices.
@@ -1156,14 +1157,20 @@ class FileManager:
         try:
             with open(self._rotation_path(photo_id)) as f:
                 return int(json.load(f).get("rotation", 0))
-        except (OSError, ValueError, AttributeError):
+        except FileNotFoundError:
+            return 0
+        except (OSError, ValueError, AttributeError) as e:
+            logging.warning("Bad rotation sidecar for %s: %s", photo_id, e)
             return 0
 
     def set_rotation(self, photo_id, rotation):
-        """Record the rotation used for this photo's saved copies."""
+        """Record the rotation used for this photo's saved copies (no sidecar for 0)."""
         if rotation:
             with open(self._rotation_path(photo_id), "w") as f:
                 json.dump({"rotation": rotation}, f)
+        elif os.path.exists(self._rotation_path(photo_id)):
+            # A reused id must not inherit a sidecar left by an interrupted save.
+            os.remove(self._rotation_path(photo_id))
 
     def list_all_photos(self):
         """List all photos with their information."""
@@ -1186,7 +1193,7 @@ class FileManager:
         return photos
 
     def delete_photo(self, photo_id):
-        """Delete both original and processed versions of a photo."""
+        """Delete a photo's original, its dithered copies and its rotation sidecar."""
         deleted_files = []
 
         # Delete original
@@ -1197,8 +1204,7 @@ class FileManager:
                 deleted_files.append(original_path)
                 break
 
-        # Delete processed version
-        # Delete processed version (both png and legacy jpg)
+        # Delete the dithered copies (png and legacy jpg) and the rotation sidecar
         dithered_png = os.path.join(self.processed_path, f"{photo_id}_dithered.png")
         dithered_jpg = os.path.join(self.processed_path, f"{photo_id}_dithered.jpg")
         for p in (dithered_png, dithered_jpg, self._rotation_path(photo_id)):
@@ -1219,7 +1225,9 @@ class FileManager:
 # To use another display, keep this public surface compatible:
 # prepare_async(), is_busy(), display_image(), display_buffer(),
 # display_buffer_async(), clear_display(),
-# display_dashboard_qr(), and sleep().
+# display_dashboard_qr(), and sleep(). The async methods take on_done, return
+# False / {"error": "display_busy"} while a refresh runs, and call on_done only
+# after a refresh completes; CameraSystem relies on that to track the panel.
 #
 # Also update DISPLAY_* constants and the dither palette/mapping in
 # ImageProcessor if the panel has a different resolution, orientation, color
@@ -1234,6 +1242,7 @@ class EInkDisplay:
         self.epd = None
         self._initialized = False
         self._display_busy = False  # True while the panel is mid-refresh
+        self.last_failure = None  # monotonic time of the last failed refresh
         self._display_thread = None
         self._display_lock = threading.Lock()
         self._init_lock = threading.Lock()
@@ -1307,7 +1316,7 @@ class EInkDisplay:
         refresh is never recorded as shown.
 
         Sets _display_busy=True before starting and clears it when the refresh
-        cycle completes, so every refresh blocks the shutter the same way.
+        cycle completes, so every refresh blocks the shutter and next buttons the same way.
         """
         with self._display_lock:
             if self._display_busy:
@@ -1324,15 +1333,20 @@ class EInkDisplay:
                 refresh_time = time.monotonic() - refresh_start
                 logging.info(f"{label} completed in {refresh_time:.1f}s")
                 update_diagnostics("display", activity=f"{label} completed")
-                if on_done:
-                    on_done()
             except Exception as e:
-                logging.error(f"{label} error: {e}")
+                self.last_failure = time.monotonic()
+                logging.exception(f"{label} error: {e}")
                 update_diagnostics(
                     "display",
                     "Display refresh failed. Check the display connection and SPI.",
                     "Display refresh failed",
                 )
+            else:
+                if on_done:
+                    try:
+                        on_done()
+                    except Exception:
+                        logging.exception("%s: could not record the panel state", label)
             finally:
                 with self._display_lock:
                     self._display_busy = False
@@ -1437,10 +1451,13 @@ class CameraSystem:
         Image, _ = _lazy_import_pil()
         rotation = self.file_manager.get_rotation(photo_id)
         if info["dithered_path"]:
-            dithered = to_device(Image.open(info["dithered_path"]), rotation)
-            if dithered.size == DISPLAY_IMAGE_SIZE and dithered.mode == "P":
-                return ImageProcessor.palette_image_to_buffer(dithered)
-        # No usable dithered copy: re-dither the original with the saved settings.
+            try:
+                dithered = to_device(Image.open(info["dithered_path"]), rotation)
+                if dithered.size == DISPLAY_IMAGE_SIZE and dithered.mode == "P":
+                    return ImageProcessor.palette_image_to_buffer(dithered)
+            except (OSError, ValueError) as e:
+                logging.warning(f"Dithered copy of {photo_id} is unreadable ({e}); re-dithering the original")
+        # No usable dithered copy: re-dither the original with the current processing settings.
         original = to_device(Image.open(info["original_path"]), rotation)
         buffer, _ = ImageProcessor.dither_to_display_buffer(
             ImageProcessor.resize_image(original),
@@ -1454,10 +1471,11 @@ class CameraSystem:
             return {"success": False, "error": "display_busy"}
         try:
             buffer = self.panel_buffer_for(photo_id)
-        except Exception as e:
-            logging.error(f"Photo {photo_id} is unreadable: {e}")
+        except (OSError, ValueError):
+            logging.exception(f"Photo {photo_id} is unreadable")
             return {"success": False, "error": "unreadable"}
         if buffer is None:
+            logging.warning(f"Photo {photo_id} not found")
             return {"success": False, "error": "not_found"}
         if not self.eink_display.display_buffer_async(
             buffer, lambda: self._set_panel_showing(photo_id)
@@ -1482,7 +1500,7 @@ class CameraSystem:
         result = {"success": False, "error": "empty_roll"}
         for photo_id in photo_ids:
             result = self.show_photo(photo_id)
-            if result.get("error") != "unreadable":
+            if result.get("error") not in ("unreadable", "not_found"):
                 break
         return result
 
@@ -1499,11 +1517,17 @@ class CameraSystem:
         return True
 
     def panel_tick(self, now):
-        """One ticker step: empty-roll screen or slideshow advance. True if it refreshed."""
+        """One ticker step: empty-roll screen, move off a deleted photo, or slideshow advance.
+
+        True if it refreshed.
+        """
         if not _operation_lock.acquire(blocking=False):
             return False
         try:
             if self.eink_display.is_busy():
+                return False
+            failure = self.eink_display.last_failure
+            if failure is not None and now - failure < REFRESH_RETRY_SECONDS:
                 return False
             ids = self.file_manager.photo_ids()
             if not ids:
@@ -1522,11 +1546,16 @@ class CameraSystem:
     def start_panel_ticker(self):
         """Run panel_tick every second for the lifetime of the process."""
         def _loop():
+            last_error = None
             while True:
                 try:
                     self.panel_tick(time.monotonic())
+                    last_error = None
                 except Exception as e:
-                    logging.warning(f"Panel ticker error: {e}")
+                    if str(e) != last_error:  # log each new fault once, not every second
+                        logging.exception("Panel ticker error")
+                        update_diagnostics("display", f"Slideshow stopped: {e}", "Panel ticker error")
+                        last_error = str(e)
                 time.sleep(1)
 
         threading.Thread(target=_loop, daemon=True).start()
@@ -1753,7 +1782,9 @@ class CameraSystem:
             processing_settings = self.camera_manager.settings.get("processing", {})
 
         return ImageProcessor.reprocess_photo_by_id(
-            photo_id, processing_settings, rotation=self.file_manager.get_rotation(photo_id)
+            photo_id, processing_settings,
+            photos_path=self.file_manager.save_path, output_path=self.file_manager.processed_path,
+            rotation=self.file_manager.get_rotation(photo_id)
         )
 
     def list_photos_api(self):
@@ -1831,11 +1862,9 @@ def handle_button_press(camera_system, button):
         return {"success": False, "error": "display_busy"}
     with _operation_lock:
         camera_system.update_activity()
-        if button == "next":
-            return camera_system.next_photo()
-        result = camera_system.capture_photo_api()
+        result = camera_system.next_photo() if button == "next" else camera_system.capture_photo_api()
     if not result.get("success"):
-        logging.error("Capture failed: %s", result.get("message", "unknown error"))
+        logging.warning("%s press failed: %s", button, result.get("message") or result.get("error"))
     return result
 
 # FastAPI application exposing hardware control over localhost (lazy initialized)

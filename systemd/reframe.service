@@ -11,7 +11,7 @@ NotifyAccess=main
 User=cam
 Group=cam
 WorkingDirectory=/home/cam/reframe
-# Use maximum clock only for boot-critical imports/capture, then return to a
+# Use maximum clock only for boot-critical imports and camera init, then return to a
 # demand-based governor after READY=1 or whenever the service stops.
 ExecStartPre=+/bin/sh -c 'if grep -qw performance /sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors 2>/dev/null; then echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor; fi; exit 0'
 ExecStart=/home/cam/reframe/scripts/reframe-python /home/cam/reframe/reframe.py

@@ -2307,6 +2307,8 @@ async def dashboard():
                         const result = await response.json();
                         alert(result.success ? result.message
                             : result.error === 'display_busy' ? 'The screen is refreshing. Try again when it finishes.'
+                            : result.error === 'unreadable' ? "This photo's file could not be read. Try reprocessing it, or delete it."
+                            : result.error === 'not_found' ? 'That photo is no longer on the camera.'
                             : `Error: ${result.error || result.message}`);
                     } else {
                         const error = await response.json();

@@ -121,8 +121,8 @@ step "Setting up user permissions"
 sudo usermod -a -G video,spi,gpio "$CURRENT_USER"
 info "Added $CURRENT_USER to hardware groups (video, spi, gpio)"
 
-# ── 5. Configuration ────────────────────────
-step "Setting up configuration"
+# ── 5. Photo directories ────────────────────
+step "Creating photo directories"
 
 # Create photo directories
 mkdir -p "$SCRIPT_DIR/photos"
