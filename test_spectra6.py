@@ -434,3 +434,15 @@ def test_legacy_qr_key_is_honoured():
     assert merge_defaults({"system": {"show_dashboard_qr_on_first_network": True}})["system"]["show_dashboard_qr_on_wifi_connect"] is True
     assert merge_defaults({"system": {"show_dashboard_qr_on_first_network": True,
                                       "show_dashboard_qr_on_wifi_connect": False}})["system"]["show_dashboard_qr_on_wifi_connect"] is False
+
+
+def test_state_cleared_before_refresh_thread_starts(system, monkeypatch):
+    p1 = snap(system)
+    class InstantThread:                                    # the refresh finishes inside start()
+        def __init__(self, target, daemon=None): self.target = target
+        def start(self): self.target()
+        def join(self, timeout=None): pass
+        def is_alive(self): return False
+    monkeypatch.setattr(reframe.threading, "Thread", InstantThread)
+    assert system.show_photo(p1)["success"]
+    assert system.panel_showing == p1

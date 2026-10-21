@@ -1226,8 +1226,9 @@ class FileManager:
 # prepare_async(), is_busy(), display_image(), display_buffer(),
 # display_buffer_async(), clear_display(),
 # display_dashboard_qr(), and sleep(). The async methods take on_done, return
-# False / {"error": "display_busy"} while a refresh runs, and call on_done only
-# after a refresh completes; CameraSystem relies on that to track the panel.
+# False / {"error": "display_busy"} while a refresh runs, call on_start before
+# the panel is touched and on_done only after a refresh completes; CameraSystem
+# relies on that to track the panel.
 #
 # Also update DISPLAY_* constants and the dither palette/mapping in
 # ImageProcessor if the panel has a different resolution, orientation, color
@@ -1309,9 +1310,10 @@ class EInkDisplay:
         if buffer:
             self.epd.display(buffer, fast_refresh=self._fast_refresh_enabled())
 
-    def _refresh_async(self, action, label, on_done=None):
+    def _refresh_async(self, action, label, on_done=None, on_start=None):
         """Run one panel refresh in a background thread; False if the panel is busy.
 
+        on_start runs once the refresh is accepted, before the panel is touched;
         on_done runs only after the refresh completes, so an interrupted or failed
         refresh is never recorded as shown.
 
@@ -1351,11 +1353,13 @@ class EInkDisplay:
                 with self._display_lock:
                     self._display_busy = False
 
+        if on_start:
+            on_start()
         self._display_thread = threading.Thread(target=_refresh, daemon=True)
         self._display_thread.start()
         return True
 
-    def display_buffer_async(self, buffer, on_done=None):
+    def display_buffer_async(self, buffer, on_done=None, on_start=None):
         """Send a pre-built display buffer to the panel in the background; False if busy."""
         if not buffer:
             return False
@@ -1363,21 +1367,23 @@ class EInkDisplay:
             lambda epd: epd.display(buffer, fast_refresh=self._fast_refresh_enabled()),
             "Display refresh",
             on_done,
+            on_start,
         )
 
-    def clear_display(self, on_done=None):
+    def clear_display(self, on_done=None, on_start=None):
         """Clear the e-ink display in the background."""
         if not self._refresh_async(
-            lambda epd: epd.Clear(fast_refresh=self._fast_refresh_enabled()), "Display clear", on_done
+            lambda epd: epd.Clear(fast_refresh=self._fast_refresh_enabled()), "Display clear",
+            on_done, on_start,
         ):
             return {"success": False, "error": "display_busy"}
         return {"success": True, "message": "Display clearing"}
 
-    def display_dashboard_qr(self, access_info, rotation=0, on_done=None):
+    def display_dashboard_qr(self, access_info, rotation=0, on_done=None, on_start=None):
         """Display a QR code that opens the dashboard."""
         try:
             buffer = ImageProcessor.img2buffer(render_dashboard_qr_image(access_info, rotation))
-            if not self.display_buffer_async(buffer, on_done):
+            if not self.display_buffer_async(buffer, on_done, on_start):
                 return {"success": False, "error": "display_busy"}
             logging.info("Displaying dashboard QR code: %s", access_info.get("primary_url"))
             return {
@@ -1488,10 +1494,9 @@ class CameraSystem:
             logging.warning(f"Photo {photo_id} not found")
             return {"success": False, "error": "not_found"}
         if not self.eink_display.display_buffer_async(
-            buffer, lambda: self._set_panel_showing(photo_id)
+            buffer, lambda: self._set_panel_showing(photo_id), self._panel_refresh_started
         ):
             return {"success": False, "error": "display_busy"}
-        self._panel_refresh_started()
         logging.info(f"Showing photo {photo_id}")
         return {"success": True, "photo_id": photo_id, "message": f"Showing photo {photo_id}"}
 
@@ -1522,10 +1527,10 @@ class CameraSystem:
             return False
         screen = render_text_screen(EMPTY_ROLL_TEXT, orientation_rotation(self._display_settings()))
         if not self.eink_display.display_buffer_async(
-            ImageProcessor.img2buffer(screen), lambda: self._set_panel_showing("empty")
+            ImageProcessor.img2buffer(screen), lambda: self._set_panel_showing("empty"),
+            self._panel_refresh_started,
         ):
             return False
-        self._panel_refresh_started()
         logging.info("Showing the empty-roll screen")
         return True
 
@@ -1577,10 +1582,9 @@ class CameraSystem:
         threading.Thread(target=_loop, daemon=True).start()
 
     def clear_display_api(self):
-        result = self.eink_display.clear_display(lambda: self._set_panel_showing("clear"))
-        if result.get("success"):
-            self._panel_refresh_started()
-        return result
+        return self.eink_display.clear_display(
+            lambda: self._set_panel_showing("clear"), self._panel_refresh_started
+        )
 
     def start_timeout_monitor(self):
         """Start the background timeout monitoring thread."""
@@ -1653,13 +1657,10 @@ class CameraSystem:
                 "access": access_info
             }
 
-        result = self.eink_display.display_dashboard_qr(
+        return self.eink_display.display_dashboard_qr(
             access_info, orientation_rotation(self._display_settings()),
-            lambda: self._set_panel_showing("qr"),
+            lambda: self._set_panel_showing("qr"), self._panel_refresh_started,
         )
-        if result.get("success"):
-            self._panel_refresh_started()
-        return result
 
     def start_dashboard_qr_monitor(self):
         """Watch for usable network changes for the lifetime of the process."""
@@ -1752,10 +1753,10 @@ class CameraSystem:
                 # Send to display ASAP (async — screen starts blinking immediately)
                 if display_settings.get("auto_display", True):
                     logging.info("Sending to display (async)")
-                    if self.eink_display.display_buffer_async(
-                        display_buffer, lambda: self._set_panel_showing(result["photo_id"])
-                    ):
-                        self._panel_refresh_started()
+                    self.eink_display.display_buffer_async(
+                        display_buffer, lambda: self._set_panel_showing(result["photo_id"]),
+                        self._panel_refresh_started,
+                    )
 
                 display_sent_time = time.monotonic()
                 logging.info(f"Total button-to-display: {((display_sent_time - pipeline_start)*1000):.0f}ms")
