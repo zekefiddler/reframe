@@ -233,3 +233,52 @@ def test_clear_is_async_and_sets_busy(system):
 def test_clear_route_not_shadowed_by_photo_route():
     paths = [r.path for r in reframe._create_fastapi_routes().routes]
     assert paths.index("/api/display/clear") < paths.index("/api/display/{photo_id}")
+
+
+def test_empty_roll_drawn_once_across_restarts(system, tmp_path):
+    assert system.panel_tick(time.monotonic()); settle(system)
+    assert system.panel_showing == "empty" and len(frames(system)) == 1
+    restarted = make_system(tmp_path)
+    assert not restarted.panel_tick(time.monotonic())
+    assert frames(restarted) == []
+
+
+def test_empty_roll_not_drawn_over_qr_or_clear(system):
+    for screen in ("qr", "clear"):
+        system._set_panel_showing(screen)
+        assert not system.panel_tick(time.monotonic())
+    assert frames(system) == []
+
+
+def test_next_steps_back_wraps_and_shutter_resets(system):
+    p1, p2, p3 = snap(system), snap(system), snap(system)
+    shown = []
+    for _ in range(3):
+        system.next_photo(); settle(system); shown.append(system.panel_showing)
+    assert shown == [p2, p1, p3]
+    p4 = snap(system)
+    system.next_photo(); settle(system)
+    assert system.panel_showing == p3 and p4 > p3
+
+
+def test_next_ignored_while_busy(system):
+    snap(system); p2 = snap(system)
+    system.eink_display._display_busy = True
+    assert system.next_photo()["error"] == "display_busy" and system.panel_showing == p2
+
+
+def test_slideshow_waits_full_interval_after_shutter(system):
+    snap(system); snap(system)
+    assert not system.panel_tick(system.last_panel_change + 3600)        # interval 0 = off
+    system.camera_manager.settings["display"]["slideshow_interval_seconds"] = 60
+    assert not system.panel_tick(system.last_panel_change + 59)
+    assert system.panel_tick(system.last_panel_change + 60)
+
+
+def test_delete_all_ends_on_empty_roll(system):
+    ids = [snap(system), snap(system)]
+    system.eink_display._display_busy = True                             # mid-refresh during the deletes
+    for pid in ids: system.delete_photo_api(pid)
+    system.eink_display._display_busy = False
+    assert system.panel_tick(time.monotonic()); settle(system)
+    assert system.panel_showing == "empty"

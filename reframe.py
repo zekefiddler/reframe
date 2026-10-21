@@ -1449,6 +1449,54 @@ class CameraSystem:
         logging.info(f"Showing photo {photo_id}")
         return {"success": True, "photo_id": photo_id, "message": f"Showing photo {photo_id}"}
 
+    def next_photo(self):
+        """Step the panel to the next older photo, wrapping to the newest."""
+        if self.eink_display.is_busy():
+            return {"success": False, "error": "display_busy"}
+        photo_id = next_photo_id(self.file_manager.photo_ids(), self.panel_showing)
+        if photo_id is None:
+            return {"success": False, "error": "empty_roll"}
+        return self.show_photo(photo_id)
+
+    def show_empty_roll_if_needed(self):
+        """Draw the empty-roll screen once, unless the panel already shows something chosen."""
+        if self.file_manager.photo_ids() or self.panel_showing in ("empty", "qr", "clear"):
+            return False
+        screen = render_text_screen(EMPTY_ROLL_TEXT, orientation_rotation(self._display_settings()))
+        if not self.eink_display.display_buffer_async(ImageProcessor.img2buffer(screen)):
+            return False
+        self._set_panel_showing("empty")
+        logging.info("Showing the empty-roll screen")
+        return True
+
+    def panel_tick(self, now):
+        """One ticker step: empty-roll screen or slideshow advance. True if it refreshed."""
+        if not _operation_lock.acquire(blocking=False):
+            return False
+        try:
+            if self.eink_display.is_busy():
+                return False
+            if not self.file_manager.photo_ids():
+                return self.show_empty_roll_if_needed()
+            interval = self._display_settings().get("slideshow_interval_seconds", 0)
+            if interval > 0 and now - self.last_panel_change >= interval:
+                return self.next_photo().get("success", False)
+            return False
+        finally:
+            _operation_lock.release()
+
+    def start_panel_ticker(self):
+        """Run panel_tick every second for the lifetime of the process."""
+        def _loop():
+            while True:
+                try:
+                    self.panel_tick(time.monotonic())
+                except Exception as e:
+                    logging.warning(f"Panel ticker error: {e}")
+                time.sleep(1)
+
+        threading.Thread(target=_loop, daemon=True).start()
+
     def clear_display_api(self):
         result = self.eink_display.clear_display()
         if result.get("success"):
@@ -1687,8 +1735,14 @@ class CameraSystem:
         return self.file_manager.get_photo_info(photo_id)
 
     def delete_photo_api(self, photo_id):
-        """API-style photo deletion."""
-        return self.file_manager.delete_photo(photo_id)
+        """API-style photo deletion; the panel moves off a deleted photo."""
+        result = self.file_manager.delete_photo(photo_id)
+        if result.get("success") and photo_id == self.panel_showing:
+            remaining = self.file_manager.photo_ids()
+            # An empty roll is left to panel_tick, which retries until the panel is free.
+            if remaining:
+                self.show_photo(remaining[-1])
+        return result
 
     def reload_settings_api(self):
         """API-style settings reload."""
@@ -1764,6 +1818,17 @@ def _create_fastapi_routes():
             camera_system.update_activity()
             result = camera_system.capture_photo_api()
         return result
+
+    @app.post("/api/next")
+    def api_next():
+        global camera_system
+        if camera_system is None:
+            raise HTTPException(status_code=503, detail="Camera system not initialized")
+        if camera_system.eink_display.is_busy():
+            return {"success": False, "error": "display_busy", "message": "Display is refreshing, please wait"}
+        with _operation_lock:
+            camera_system.update_activity()
+            return camera_system.next_photo()
 
     @app.post("/api/display/clear")
     def api_clear_display():
