@@ -2511,7 +2511,10 @@ async def dashboard():
                 document.getElementById('fast-refresh').value = settings.display?.fast_refresh === true ? 'true' : 'false';
                 document.getElementById('orientation').value = settings.display.orientation;
                 document.getElementById('portrait-rotation').value = String(settings.display.portrait_rotation);
-                document.getElementById('slideshow-minutes').value = Math.round(settings.display.slideshow_interval_seconds / 60);
+                const slideshowSeconds = settings.display.slideshow_interval_seconds || 0;
+                const slideshowField = document.getElementById('slideshow-minutes');
+                slideshowField.dataset.seconds = slideshowSeconds;
+                slideshowField.value = Math.ceil(slideshowSeconds / 60);
                 document.getElementById('camera-name').value = settings.system.camera_name || '';
                 document.getElementById('auto-refresh-interval').value = settings.system.auto_refresh_interval;
                 document.getElementById('auto-timeout-enabled').value = settings.system.auto_timeout_enabled ? 'true' : 'false';
@@ -2618,6 +2621,14 @@ async def dashboard():
                 }
             }
             
+            // Keep an interval set in seconds (e.g. through the API) unless the minutes field was changed.
+            function slideshowSecondsFromForm() {
+                const field = document.getElementById('slideshow-minutes');
+                const savedSeconds = Number(field.dataset.seconds || 0);
+                if (field.value === String(Math.ceil(savedSeconds / 60))) return savedSeconds;
+                return (parseInt(field.value) || 0) * 60;
+            }
+
             async function saveSettings() {
                 try {
                     const settings = {
@@ -2644,7 +2655,7 @@ async def dashboard():
                             fast_refresh: document.getElementById('fast-refresh').value === 'true',
                             orientation: document.getElementById('orientation').value,
                             portrait_rotation: parseInt(document.getElementById('portrait-rotation').value),
-                            slideshow_interval_seconds: parseInt(document.getElementById('slideshow-minutes').value) * 60
+                            slideshow_interval_seconds: slideshowSecondsFromForm()
                         },
                         system: {
                             camera_name: document.getElementById('camera-name').value.trim(),

@@ -1416,6 +1416,7 @@ class CameraSystem:
         self.panel_showing = self._read_panel_state()  # photo id, "empty", "qr", "clear" or None
         self.last_panel_change = time.monotonic()
         self._save_thread = None
+        self._auto_retry_after = 0.0  # the ticker's own attempts wait until then after a failure
         self.timeout_thread = None
         self.timeout_running = False
         self._timeout_started = False
@@ -1547,6 +1548,8 @@ class CameraSystem:
             failure = self.eink_display.last_failure
             if failure is not None and now - failure < REFRESH_RETRY_SECONDS:
                 return False
+            if now < self._auto_retry_after:
+                return False
             ids = self.file_manager.photo_ids()
             if not ids:
                 return self.show_empty_roll_if_needed()
@@ -1556,11 +1559,16 @@ class CameraSystem:
             deleted = (self.panel_showing or "").isdigit() and self.panel_showing not in ids
             if (unknown or deleted) and not saving:
                 # Put the newest photo up rather than leave a half-drawn or deleted one.
-                return self._show_first_readable(reversed(ids)).get("success", False)
-            interval = self._display_settings().get("slideshow_interval_seconds", 0)
-            if interval > 0 and now - self.last_panel_change >= interval:
-                return self.next_photo().get("success", False)
-            return False
+                result = self._show_first_readable(reversed(ids))
+            else:
+                interval = self._display_settings().get("slideshow_interval_seconds", 0)
+                if not (interval > 0 and now - self.last_panel_change >= interval):
+                    return False
+                result = self.next_photo()
+            if not result.get("success") and result.get("error") != "display_busy":
+                # Every candidate failed: don't rescan the roll every second.
+                self._auto_retry_after = now + REFRESH_RETRY_SECONDS
+            return result.get("success", False)
         finally:
             _operation_lock.release()
 

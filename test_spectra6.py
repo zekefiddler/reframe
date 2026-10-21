@@ -163,7 +163,9 @@ def system(tmp_path, monkeypatch):
     monkeypatch.setattr(reframe, "SAVE_PATH", str(tmp_path / "photos"))
     monkeypatch.setattr(reframe, "PROCESSED_PATH", str(tmp_path / "dithered"))
     monkeypatch.setattr(reframe, "PANEL_STATE_PATH", str(tmp_path / "panel_showing"))
-    return make_system(tmp_path)
+    s = make_system(tmp_path)
+    yield s
+    settle(s)                                   # no worker may outlive the patched paths
 
 
 def make_system(tmp_path):
@@ -446,3 +448,16 @@ def test_state_cleared_before_refresh_thread_starts(system, monkeypatch):
     monkeypatch.setattr(reframe.threading, "Thread", InstantThread)
     assert system.show_photo(p1)["success"]
     assert system.panel_showing == p1
+
+
+def test_automatic_refresh_backs_off_when_every_photo_is_unreadable(system, monkeypatch):
+    snap(system); snap(system)
+    system.panel_showing = None                             # unknown panel: recovery wants to redraw
+    attempts = []
+    monkeypatch.setattr(system, "panel_buffer_for", lambda pid: attempts.append(pid) or (_ for _ in ()).throw(OSError("bad")))
+    now = time.monotonic()
+    assert not system.panel_tick(now)
+    tried = len(attempts)
+    assert not system.panel_tick(now + 1) and len(attempts) == tried      # no rescan every second
+    assert not system.panel_tick(now + reframe.REFRESH_RETRY_SECONDS + 1) and len(attempts) > tried
+    assert system.next_photo()["error"] == "unreadable"                   # a manual press still tries
