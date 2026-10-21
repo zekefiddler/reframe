@@ -102,7 +102,7 @@ http://reframe.local:8000
 
 If you used a different Pi hostname during Raspberry Pi Imager setup, replace `reframe` with that hostname.
 
-Dashboard settings include a software update button for git-based installs. It checks the configured upstream repo, installs fast-forward updates only, preserves ignored user data such as your settings and photos, refreshes dependencies and service files, and asks you to reboot after a successful update.
+Dashboard settings include a software update button for git-based installs. It checks the configured upstream repo, installs fast-forward updates only, preserves ignored user data such as your settings and photos, then tries to refresh dependencies and service files. The installer adds no passwordless sudo rule, so that last step stops and asks you to finish over SSH with `sudo /usr/local/sbin/reframe-apply-update`, then reboot.
 
 Advanced export settings include an optional 2× dithered-image mode. When enabled, dithered downloads and Are.na uploads are enlarged at export time to help them look sharp on social media. Original photos, stored dithered photos, gallery previews, display output, and download-all ZIP files are unchanged. This option is disabled by default.
 

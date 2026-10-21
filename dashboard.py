@@ -3454,7 +3454,10 @@ async def install_update():
         detail = git_error_detail(apply_result, "post-update installation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Code was updated, but installation did not finish: {detail}"
+            detail=(
+                f"Code was updated, but installation did not finish: {detail}. "
+                f"Finish it over SSH with: sudo {UPDATE_HELPER_PATH}"
+            )
         )
 
     try:

@@ -29,7 +29,7 @@
 - **No new pip dependencies.** Remove `smbus2`.
 - **Camera Module 3 (imx708), as upstream** (Zeke switched from the v2 on 2026-10-21). Keep upstream's autofocus (`AfMode`, `autofocus_mode`, `_settle_autofocus`) and the HDR helper (`scripts/enable_hdr.sh`, `_enable_camera_hdr`) unchanged.
 - **Zeke runs every `sudo`,** in as few batched `ssh -t` commands as possible. Claude never asks for or stores his password.
-- **Root surface stays at upstream's level.** The sudoers rule names only `/usr/local/sbin/reframe-apply-update`.
+- **Root surface: no passwordless sudo.** Zeke ruled on 2026-10-21 that the installer adds no sudoers rule, because the helper installs files the login user can write. Updates finish over SSH with `sudo /usr/local/sbin/reframe-apply-update`.
 - **Match upstream style:**
   - module-level helpers in `reframe.py`
   - results shaped as `{"success": bool, ...}` dicts
@@ -567,7 +567,7 @@ def test_dashboard_has_spectra6_controls(dashboard):
   - apt installs `git python3-pip python3-venv python3-picamera2 python3-spidev python3-gpiozero python3-lgpio netcat-openbsd v4l-utils` (`v4l2-ctl` is what the HDR helper runs).
   - Drops `do_i2c`, the PiSugar section, and the RTC section and timezone. Keeps the enable_hdr chmod.
   - Keeps SPI, `camera_auto_detect`, the boot trims, groups and the service trims.
-  - Writes `/etc/default/reframe`, installs the helper and writes the sudoers rule for `$CURRENT_USER`, then runs `sudo /usr/local/sbin/reframe-apply-update`. That one script now builds the venv and installs the units.
+  - Writes `/etc/default/reframe`, installs the helper (no sudoers rule), then runs `sudo /usr/local/sbin/reframe-apply-update`. That one script now builds the venv and installs the units.
   - Enables only `reframe`, `reframe-dashboard` and `reframe-dashboard-proxy`.
 - `reframe-python`: `REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"`, with `VENV_PYTHON="$REPO_DIR/.venv/bin/python"`.
 

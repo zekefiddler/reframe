@@ -142,11 +142,11 @@ printf 'REFRAME_USER=%s\nREFRAME_GROUP=%s\nREFRAME_REPO=%s\n' "$CURRENT_USER" "$
 sudo chown root:root /etc/default/reframe
 sudo chmod 644 /etc/default/reframe
 
-# Install the narrow privileged helper used after dashboard git updates.
+# Install the privileged update helper. No passwordless sudo rule: the helper
+# installs files this user can edit, so a rule would make the account root.
+# Finish a dashboard update over SSH with: sudo /usr/local/sbin/reframe-apply-update
 sudo install -o root -g root -m 0755 "$SCRIPT_DIR/scripts/reframe-apply-update" /usr/local/sbin/reframe-apply-update
-echo "$CURRENT_USER ALL=(root) NOPASSWD: /usr/local/sbin/reframe-apply-update" | sudo tee /etc/sudoers.d/reframe-update-helper > /dev/null
-sudo chmod 440 /etc/sudoers.d/reframe-update-helper
-sudo visudo -cf /etc/sudoers.d/reframe-update-helper > /dev/null
+sudo rm -f /etc/sudoers.d/reframe-update-helper
 info "Installed software update helper"
 
 # ── 7. Systemd services ─────────────────────

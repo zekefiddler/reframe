@@ -461,3 +461,25 @@ def test_automatic_refresh_backs_off_when_every_photo_is_unreadable(system, monk
     assert not system.panel_tick(now + 1) and len(attempts) == tried      # no rescan every second
     assert not system.panel_tick(now + reframe.REFRESH_RETRY_SECONDS + 1) and len(attempts) > tried
     assert system.next_photo()["error"] == "unreadable"                   # a manual press still tries
+
+
+def test_installer_grants_no_passwordless_sudo():
+    # Owner's ruling: the helper installs files the login user can write, so no NOPASSWD rule.
+    assert "NOPASSWD" not in open("install.sh").read()
+
+
+def test_update_without_sudo_rule_says_how_to_finish(dashboard, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    helper = tmp_path / "reframe-apply-update"
+    helper.write_text("")
+    async def status(fetch=True):
+        return {"up_to_date": False, "post_install_pending": True, "diverged": False,
+                "has_tracked_changes": False, "update_available": False}
+    async def no_sudo(args, timeout=30):
+        return {"returncode": 1, "stdout": "", "stderr": "sudo: a password is required\n"}
+    monkeypatch.setattr(dashboard, "get_update_status", status)
+    monkeypatch.setattr(dashboard, "run_repo_command", no_sudo)
+    monkeypatch.setattr(dashboard, "UPDATE_HELPER_PATH", str(helper))
+    r = TestClient(dashboard.app).post("/api/update/install")
+    assert r.status_code == 500
+    assert f"sudo {helper}" in r.json()["detail"]
