@@ -319,3 +319,11 @@ def test_rotate_180_sets_camera_transform(monkeypatch, flip):
     cm.configure_camera()
     transform = cm.picam2.configs[0].get("transform")
     assert (transform.flips == (1, 1)) if flip else transform is None
+
+
+def test_dashboard_has_spectra6_controls(dashboard):
+    from fastapi.testclient import TestClient
+    html = TestClient(dashboard.app).get("/").text
+    for element_id in ("autofocus-mode", "rotate-180", "contrast", "orientation", "portrait-rotation", "slideshow-minutes"):
+        assert f'id="{element_id}"' in html
+    assert "/api/settings/defaults" in html
