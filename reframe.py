@@ -87,6 +87,7 @@ DISPLAY_PANEL_WIDTH = 400
 DISPLAY_PANEL_HEIGHT = 600
 DISPLAY_IMAGE_SIZE = (DISPLAY_IMAGE_WIDTH, DISPLAY_IMAGE_HEIGHT)
 DISPLAY_PANEL_SIZE = (DISPLAY_PANEL_WIDTH, DISPLAY_PANEL_HEIGHT)
+EMPTY_ROLL_TEXT = "Take your first picture and wait for it to appear on the screen."
 BUTTON_POLL_INTERVAL_SECONDS = 0.025
 
 os.makedirs(RUNTIME_PATH, exist_ok=True)
@@ -290,8 +291,50 @@ def _auto_display_enabled(settings_path):
     return True
 
 
-def render_dashboard_qr_image(access_info):
-    """Render a dashboard QR screen for the ePaper display."""
+def orientation_rotation(display_settings):
+    """Degrees to rotate saved copies for the configured orientation (0 = landscape)."""
+    if display_settings.get("orientation") == "portrait":
+        return display_settings.get("portrait_rotation", 90)
+    return 0
+
+
+def to_saved(image, rotation):
+    """Rotate a device-coordinate image so it is upright on a computer."""
+    return image.rotate(rotation, expand=True) if rotation else image
+
+
+def to_device(image, rotation):
+    """Undo to_saved: back to the camera/panel's device coordinates."""
+    return image.rotate(-rotation, expand=True) if rotation else image
+
+
+def dither_settings(processing):
+    """Keyword arguments for the dither functions, filled in from the defaults."""
+    settings = merge_defaults({"processing": processing or {}})["processing"]
+    keys = ("saturation", "brightness_factor", "color_factor", "contrast",
+            "dithering_method", "bayer_size", "threshold_scale")
+    return {key: settings[key] for key in keys}
+
+
+def render_text_screen(text, rotation):
+    """Render a text screen that reads upright for the orientation, in device coordinates."""
+    Image, _ = _lazy_import_pil()
+    from PIL import ImageDraw, ImageFont
+    import textwrap
+
+    size = DISPLAY_IMAGE_SIZE if not rotation else (DISPLAY_IMAGE_HEIGHT, DISPLAY_IMAGE_WIDTH)
+    canvas = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default(size=28)
+    y = 40
+    for line in textwrap.wrap(text, 32 if not rotation else 20):
+        draw.text((40, y), line, fill="black", font=font)
+        y += 40
+    return to_device(canvas, rotation)
+
+
+def render_dashboard_qr_image(access_info, rotation=0):
+    """Render a dashboard QR screen for the ePaper display, in device coordinates."""
     Image, _ = _lazy_import_pil()
     from PIL import ImageDraw
     import qrcode
@@ -305,6 +348,20 @@ def render_dashboard_qr_image(access_info):
     qr.make(fit=True)
     qr_image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     qr_image = qr_image.resize((250, 250))
+
+    lines = ["reFrame dashboard", primary_url]
+    if fallback_url:
+        lines += ["If that does not open:", fallback_url]
+    lines += ["Scan with your phone", "to open photos."]
+
+    if rotation:
+        # Portrait: QR on top, text under it.
+        canvas = Image.new("RGB", (DISPLAY_IMAGE_HEIGHT, DISPLAY_IMAGE_WIDTH), "white")
+        canvas.paste(qr_image, (75, 40))
+        draw = ImageDraw.Draw(canvas)
+        for i, line in enumerate(lines):
+            draw.text((30, 320 + i * 30), line, fill="black")
+        return to_device(canvas, rotation)
 
     canvas = Image.new("RGB", DISPLAY_IMAGE_SIZE, "white")
     canvas.paste(qr_image, (30, 75))
@@ -556,6 +613,16 @@ class ImageProcessor:
     """Handles image processing, including resizing, dithering, and saving."""
 
     @staticmethod
+    def enhance(image, brightness_factor, contrast, color_factor):
+        """Brightness, then contrast, then colour: the tone steps before dithering."""
+        _, ImageEnhance = _lazy_import_pil()
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        image = ImageEnhance.Brightness(image).enhance(brightness_factor)
+        image = ImageEnhance.Contrast(image).enhance(contrast)
+        return ImageEnhance.Color(image).enhance(color_factor)
+
+    @staticmethod
     def get_bayer_matrix(size):
         """Generate Bayer matrix for ordered dithering."""
         np = _lazy_import_numpy()
@@ -585,7 +652,7 @@ class ImageProcessor:
 
     @staticmethod
     def apply_ordered_dithering(image, saturation=0.6, brightness_factor=1.1, color_factor=1.4,
-                               bayer_size=4, threshold_scale=1.0):
+                               bayer_size=4, threshold_scale=1.0, contrast=1.0):
         """Apply ordered dithering using standard Bayer threshold + LUT nearest-color."""
         Image, ImageEnhance = _lazy_import_pil()
         np = _lazy_import_numpy()
@@ -593,17 +660,7 @@ class ImageProcessor:
         import time
         start_time = time.monotonic()
 
-        # Ensure the image is in RGB mode
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
-        # Adjust brightness
-        enhancer = ImageEnhance.Brightness(image)
-        image = enhancer.enhance(brightness_factor)
-
-        # Adjust color intensity
-        enhancer = ImageEnhance.Color(image)
-        image = enhancer.enhance(color_factor)
+        image = ImageProcessor.enhance(image, brightness_factor, contrast, color_factor)
 
         # Convert image to numpy array
         img_array = np.array(image, dtype=np.float32)
@@ -724,27 +781,19 @@ class ImageProcessor:
 
     @staticmethod
     def apply_dithering(image, saturation=0.6, brightness_factor=1.1, color_factor=1.4,
-                       dithering_method="floyd_steinberg", bayer_size=4, threshold_scale=1.0):
-        """Applies brightness, color enhancement, and dithering."""
+                       dithering_method="floyd_steinberg", bayer_size=4, threshold_scale=1.0,
+                       contrast=1.0):
+        """Applies brightness, contrast, color enhancement, and dithering."""
         if dithering_method == "ordered":
             return ImageProcessor.apply_ordered_dithering(
-                image, saturation, brightness_factor, color_factor, bayer_size, threshold_scale
+                image, saturation, brightness_factor, color_factor, bayer_size, threshold_scale,
+                contrast
             )
         else:
             Image, ImageEnhance = _lazy_import_pil()
 
             # Default Floyd-Steinberg dithering
-            # Ensure the image is in RGB mode
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-
-            # Adjust brightness
-            enhancer = ImageEnhance.Brightness(image)
-            image = enhancer.enhance(brightness_factor)
-
-            # Adjust saturation
-            enhancer = ImageEnhance.Color(image)
-            image = enhancer.enhance(color_factor)
+            image = ImageProcessor.enhance(image, brightness_factor, contrast, color_factor)
 
             # Blend the palette
             palette = ImageProcessor.palette_blend(saturation)
@@ -760,7 +809,8 @@ class ImageProcessor:
 
     @staticmethod
     def dither_to_display_buffer(image, saturation=0.6, brightness_factor=1.1, color_factor=1.4,
-                                  dithering_method="floyd_steinberg", bayer_size=4, threshold_scale=1.0):
+                                  dithering_method="floyd_steinberg", bayer_size=4, threshold_scale=1.0,
+                                  contrast=1.0):
         """Dither an image and produce the packed display buffer in one step.
 
         Returns a tuple of (display_buffer, dithered_pil_image):
@@ -791,7 +841,7 @@ class ImageProcessor:
         # Step 1: run the normal dithering to get the palette image
         dithered_image = ImageProcessor.apply_dithering(
             image, saturation, brightness_factor, color_factor,
-            dithering_method, bayer_size, threshold_scale
+            dithering_method, bayer_size, threshold_scale, contrast
         )
 
         dither_time = time.monotonic()
@@ -822,7 +872,7 @@ class ImageProcessor:
 
     @staticmethod
     def resize_image(image, size=DISPLAY_IMAGE_SIZE):
-        """Resizes the image to the specified size."""
+        """Resizes the image to the specified size, centre-cropping rather than squashing."""
         Image, _ = _lazy_import_pil()
         if image.size == (size[0] * 2, size[1] * 2) and hasattr(image, "reduce"):
             # Preserve the 2x source capture and average each 2x2 block before
@@ -833,7 +883,8 @@ class ImageProcessor:
         # Pillow >= 10 moved filters under Image.Resampling; older Pi builds keep them on Image.
         resampling_attr = getattr(Image, "Resampling", Image)
         resample_filter = getattr(resampling_attr, "BILINEAR", Image.BILINEAR)
-        return image.resize(size, resample_filter)
+        from PIL import ImageOps
+        return ImageOps.fit(image, size, resample_filter)
 
     @staticmethod
     def img2buffer(image, width=DISPLAY_PANEL_WIDTH, height=DISPLAY_PANEL_HEIGHT):
@@ -927,30 +978,22 @@ class ImageProcessor:
         return buf
 
     @staticmethod
-    def process_photo_with_settings(original_path, output_path, processing_settings):
+    def process_photo_with_settings(original_path, output_path, processing_settings, rotation=0):
         """Process a photo with specific settings and save it."""
         try:
             Image, ImageEnhance = _lazy_import_pil()
 
-            # Load original image
-            original_image = Image.open(original_path)
+            # Load the original and turn it back into device coordinates
+            original_image = to_device(Image.open(original_path), rotation)
 
-            # Resize image
             resized_image = ImageProcessor.resize_image(original_image)
 
-            # Apply processing with settings
             dithered_image = ImageProcessor.apply_dithering(
-                resized_image,
-                saturation=processing_settings.get("saturation", 0.6),
-                brightness_factor=processing_settings.get("brightness_factor", 1.1),
-                color_factor=processing_settings.get("color_factor", 1.4),
-                dithering_method=processing_settings.get("dithering_method", "floyd_steinberg"),
-                bayer_size=processing_settings.get("bayer_size", 4),
-                threshold_scale=processing_settings.get("threshold_scale", 1.0)
+                resized_image, **dither_settings(processing_settings)
             )
 
-            # Save processed image as PNG (keep palette if present)
-            dithered_image.save(output_path, format="PNG")
+            # Save processed image as PNG (keep palette if present), upright for the gallery
+            to_saved(dithered_image, rotation).save(output_path, format="PNG")
             logging.info(f"Processed image saved to {output_path}")
 
             return {
@@ -1513,13 +1556,7 @@ class CameraSystem:
 
                 # Combined dither + buffer: produces display-ready buffer AND the dithered image
                 display_buffer, dithered_image = ImageProcessor.dither_to_display_buffer(
-                    resized_image,
-                    saturation=processing_settings.get("saturation", 0.6),
-                    brightness_factor=processing_settings.get("brightness_factor", 1.1),
-                    color_factor=processing_settings.get("color_factor", 1.4),
-                    dithering_method=processing_settings.get("dithering_method", "floyd_steinberg"),
-                    bayer_size=processing_settings.get("bayer_size", 4),
-                    threshold_scale=processing_settings.get("threshold_scale", 1.0)
+                    resized_image, **dither_settings(processing_settings)
                 )
 
                 process_time = time.monotonic()
