@@ -301,12 +301,7 @@ class SettingsManager:
                 os.unlink(temp_path)
     
     def _merge_with_defaults(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge loaded settings with defaults to ensure all keys exist."""
-        system_settings = settings.get("system")
-        if isinstance(system_settings, dict):
-            legacy_value = system_settings.pop("show_dashboard_qr_on_first_network", None)
-            if "show_dashboard_qr_on_wifi_connect" not in system_settings and legacy_value is not None:
-                system_settings["show_dashboard_qr_on_wifi_connect"] = legacy_value
+        """Merge loaded settings with defaults (this also migrates legacy keys)."""
         return merge_defaults(settings)
     
     def _deep_merge(self, default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

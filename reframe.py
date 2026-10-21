@@ -1445,7 +1445,9 @@ class CameraSystem:
             logging.warning(f"Could not save panel state: {e}")
 
     def _panel_refresh_started(self):
-        """Until the refresh completes, a restart finds the panel state unknown and redraws it."""
+        """Until the refresh completes the panel state is unknown, so a failed refresh or a
+        restart mid-refresh gets the panel redrawn by panel_tick."""
+        self.panel_showing = None
         self._write_panel_state("")
 
     def _display_settings(self):
@@ -1680,10 +1682,7 @@ class CameraSystem:
         while self.dashboard_qr_running:
             try:
                 system_settings = self.camera_manager.settings.get("system", {})
-                enabled = system_settings.get(
-                    "show_dashboard_qr_on_wifi_connect",
-                    system_settings.get("show_dashboard_qr_on_first_network", True)
-                )
+                enabled = system_settings.get("show_dashboard_qr_on_wifi_connect", False)
                 if not enabled:
                     last_connection_ip = get_lan_ip_address()
                     was_enabled = False

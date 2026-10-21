@@ -417,3 +417,20 @@ def test_refresh_interrupted_by_restart_is_redrawn(system, tmp_path):
     assert restarted.panel_tick(time.monotonic()); settle(restarted)
     assert restarted.panel_showing == p2
     gate.set(); settle(system)
+
+
+def test_failed_refresh_recovers_without_restart(system):
+    p1 = snap(system)
+    def broken(buf, fast_refresh=False): raise OSError("SPI write failed")
+    system.eink_display.epd.display = broken
+    system.show_photo(p1); settle(system)
+    del system.eink_display.epd.display                     # panel works again
+    retry = system.eink_display.last_failure + reframe.REFRESH_RETRY_SECONDS + 1
+    assert system.panel_tick(retry); settle(system)
+    assert system.panel_showing == p1
+
+
+def test_legacy_qr_key_is_honoured():
+    assert merge_defaults({"system": {"show_dashboard_qr_on_first_network": True}})["system"]["show_dashboard_qr_on_wifi_connect"] is True
+    assert merge_defaults({"system": {"show_dashboard_qr_on_first_network": True,
+                                      "show_dashboard_qr_on_wifi_connect": False}})["system"]["show_dashboard_qr_on_wifi_connect"] is False

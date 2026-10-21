@@ -58,4 +58,10 @@ def _deep_merge(base, override):
 
 def merge_defaults(saved):
     """Return a fresh copy of the defaults with saved settings merged over it."""
-    return _deep_merge(copy.deepcopy(DEFAULT_SETTINGS), saved or {})
+    saved = copy.deepcopy(saved or {})
+    system = saved.get("system")
+    if isinstance(system, dict) and "show_dashboard_qr_on_first_network" in system:
+        # Older settings files used this name; an explicitly saved new key wins.
+        legacy = system.pop("show_dashboard_qr_on_first_network")
+        system.setdefault("show_dashboard_qr_on_wifi_connect", legacy)
+    return _deep_merge(copy.deepcopy(DEFAULT_SETTINGS), saved)
