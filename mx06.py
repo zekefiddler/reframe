@@ -103,6 +103,10 @@ class BluetoothUnavailable(Exception):
     pass
 
 
+class PrinterConnectFailed(Exception):
+    """The printer was found but the connection failed; nothing was printed."""
+
+
 async def send_job(client, data, rows, on_progress=None, chunk_gap=0.02, closing_timeout=None,
                    pause_timeout=PAUSE_TIMEOUT_SECONDS):
     """Send a job to a connected printer, waiting whenever it says pause.
@@ -126,7 +130,10 @@ async def send_job(client, data, rows, on_progress=None, chunk_gap=0.02, closing
             if state_replies >= 2:
                 finished.set()
 
-    await client.start_notify(RX, on_reply)
+    try:
+        await client.start_notify(RX, on_reply)
+    except Exception as e:
+        raise PrinterConnectFailed(f"{type(e).__name__}: {e}") from e
     size = client.mtu_size - 3
     for start in range(0, len(data), size):
         waited = 0.0
@@ -138,6 +145,8 @@ async def send_job(client, data, rows, on_progress=None, chunk_gap=0.02, closing
         try:
             await client.write_gatt_char(TX, data[start:start + size], response=False)
         except Exception as e:
+            if start == 0:   # nothing reached the printer
+                raise PrinterConnectFailed(f"{type(e).__name__}: {e}") from e
             raise PrinterLost(str(e)) from e
         if on_progress:
             on_progress("sending", min(start + size, len(data)), len(data))
@@ -168,10 +177,13 @@ async def _connect(device):
 
 async def print_image(image, name=NAME, on_progress=None, scan_timeout=10.0, find_device=None, connect=None):
     """Find the printer by name, connect, and print a 384 px wide image."""
-    data, rows = build_job(image)
+    if image.width != WIDTH:
+        raise ValueError(f"image must be {WIDTH} px wide, not {image.width}")
+    data, rows = await asyncio.to_thread(build_job, image)   # seconds of pure Python on a Pi: keep the loop free
     find_device = find_device or _scan
     connect = connect or _connect
-    printed = False
+    device = None
+    connected = printed = False
     try:
         device = None
         for _ in range(SCAN_ATTEMPTS):
@@ -183,13 +195,16 @@ async def print_image(image, name=NAME, on_progress=None, scan_timeout=10.0, fin
         if device is None:
             raise PrinterNotFound(f"no printer named {name} found")
         async with connect(device) as client:
+            connected = True
             await send_job(client, data, rows, on_progress)
             printed = True
-    except (PrinterNotFound, PrintTimedOut, PrinterLost):
+    except (PrinterNotFound, PrintTimedOut, PrinterLost, PrinterConnectFailed):
         raise
     except Exception as e:
         if printed:   # the strip is out; a failed disconnect afterwards does not matter
             logging.warning("Printer disconnect failed after a finished print: %s", e)
             return
+        if device is not None and not connected:
+            raise PrinterConnectFailed(f"{type(e).__name__}: {e}") from e
         logging.exception("Bluetooth error while printing")
         raise BluetoothUnavailable(f"{type(e).__name__}: {e}") from e

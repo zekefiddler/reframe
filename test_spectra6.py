@@ -787,7 +787,7 @@ def test_print_strip_is_refused_for_an_id_that_is_not_a_number(strip_app):
 
 def test_print_strip_names_a_photo_that_is_missing_or_unreadable(strip_app):
     r = start_print(strip_app, ["00001", "00009"])
-    assert r.status_code == 400 and "00009" in r.json()["detail"]
+    assert r.status_code == 400 and "00009" in r.json()["detail"]["message"]
     (strip_app.photos / "00059.jpg").write_bytes(b"")
     r = start_print(strip_app, ["00059"])
     assert r.status_code == 400 and "00059" in r.json()["detail"]
@@ -916,3 +916,97 @@ def test_printer_setup_turns_bluetooth_back_on_in_the_boot_config(before, after)
                           input=before, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout == after
+
+
+# ── final review fixes ────────────────────────────────────────────────────────
+
+def test_a_printer_found_but_not_connected_says_try_again_not_bluetooth():
+    import mx06, asyncio, contextlib
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def refuses(device):
+        raise TimeoutError()
+        yield
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=refuses))
+
+
+def test_a_failed_subscription_is_a_failed_connection():
+    import mx06, asyncio, contextlib
+    class NoNotify(FakePrinter):
+        async def start_notify(self, uuid, callback): raise RuntimeError("org.bluez.Error.InProgress")
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield NoNotify()
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect))
+
+
+def test_dashboard_says_try_again_when_the_connection_fails(strip_app, monkeypatch):
+    async def failing(image, name="MX06", on_progress=None, **kw): raise strip_app.d.mx06.PrinterConnectFailed("TimeoutError: ")
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", failing)
+    start_print(strip_app, ["00001"])
+    message = strip_app.client.get("/api/print-strip/progress").json()["message"]
+    assert "try again" in message.lower() and "nothing was printed" in message.lower() and "setup" not in message.lower()
+
+
+def test_building_the_job_does_not_freeze_the_dashboard(monkeypatch):
+    import mx06, asyncio, contextlib, time as _time
+    real = mx06.build_job
+    monkeypatch.setattr(mx06, "build_job", lambda image: (_time.sleep(0.3), real(image))[1])
+    p = FakePrinter({1: [STATE], 2: [STATE]})
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield p
+    async def run():
+        ticks = 0
+        async def ticker():
+            nonlocal ticks
+            while True: await asyncio.sleep(0.02); ticks += 1
+        t = asyncio.create_task(ticker())
+        await mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect)
+        t.cancel(); return ticks
+    assert asyncio.run(run()) >= 5          # the loop kept running while the job was built
+
+
+def test_a_print_that_hangs_frees_the_printer(strip_app, monkeypatch):
+    import asyncio
+    async def hangs(image, name="MX06", on_progress=None, **kw): await asyncio.sleep(3600)
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", hangs)
+    monkeypatch.setattr(strip_app.d, "PRINT_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(strip_app.d, "PRINT_SECONDS_PER_ROW", 0)
+    start_print(strip_app, ["00001"])
+    progress = strip_app.client.get("/api/print-strip/progress").json()
+    assert progress["status"] == "error" and "may be incomplete" in progress["message"]
+
+
+def test_print_refusal_lists_the_missing_photos_for_the_page(strip_app):
+    detail = start_print(strip_app, ["00001", "00009", "00008"]).json()["detail"]
+    assert detail["missing"] == ["00009", "00008"] and "00009" in detail["message"]
+
+
+def test_delete_selected_marks_a_photo_that_is_already_gone(strip_app, monkeypatch):
+    async def delete(path):
+        return {"success": True} if path.endswith("00001") else {"success": False, "error": "Photo not found"}
+    monkeypatch.setattr(strip_app.d.reframe_client, "delete", delete)
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00002"]}).json()
+    assert r["deleted"] == ["00001"] and r["failed"] == [{"id": "00002", "error": "Photo not found", "missing": True}]
+
+
+def test_printer_setup_stops_without_touching_the_config_when_the_backup_fails(tmp_path):
+    import subprocess
+    config = tmp_path / "config.txt"; config.write_text("dtoverlay=disable-bt\n")
+    script = f'''source scripts/setup-printer.sh
+boot_config() {{ echo "{config}"; }}
+sudo() {{ if [ "$1" = cp ]; then return 1; fi; "$@"; }}
+rc=0; enable_in_boot_config || rc=$?; echo "rc=$rc"'''
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "rc=2" in done.stdout and "switched back on" not in done.stdout
+    assert config.read_text() == "dtoverlay=disable-bt\n"
+
+
+def test_a_printer_that_fails_on_the_first_write_printed_nothing():
+    import mx06, asyncio
+    # Seen on the Pi: "Service Discovery has not been performed yet" on the first write.
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.send_job(FakePrinter(fail_at=0), bytes(500), rows=10, chunk_gap=0, closing_timeout=1))

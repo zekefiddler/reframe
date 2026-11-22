@@ -2419,7 +2419,11 @@ async def dashboard():
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        showPrintStatus(data.detail || 'The strip could not be started.');
+                        const detail = data.detail;
+                        if (detail && Array.isArray(detail.missing)) {
+                            selectedIds = selectedIds.filter(id => !detail.missing.includes(id));
+                        }
+                        showPrintStatus((detail && detail.message) || detail || 'The strip could not be started.');
                         applySelection();
                         return;
                     }
@@ -2463,7 +2467,7 @@ async def dashboard():
                     showPrintStatus(failed.length
                         ? `Deleted ${data.deleted.length}; could not delete ${failed.map(f => f.id).join(', ')}.`
                         : `Deleted ${data.deleted.length} photo${data.deleted.length === 1 ? '' : 's'}.`);
-                    selectedIds = failed.map(f => f.id);
+                    selectedIds = failed.filter(f => !f.missing).map(f => f.id);   // keep only picks worth a retry
                     await loadPhotos(currentPage);
                     applySelection();
                 } catch (error) {
@@ -4139,7 +4143,10 @@ PRINT_FAILURES = {
     mx06.PrinterLost: "Lost the printer while printing; the strip may be incomplete.",
     mx06.PrintTimedOut: "The printer stopped answering; the strip may be incomplete.",
     mx06.BluetoothUnavailable: "Bluetooth is not working on the camera ({error}). See docs/software-setup.md, Photo strips.",
+    mx06.PrinterConnectFailed: "Found printer {name} but could not connect; nothing was printed. Try again.",
 }
+PRINT_SECONDS_PER_ROW = 1 / 30   # an overall limit, so a Bluetooth call that hangs cannot hold the printer for ever
+PRINT_GRACE_SECONDS = 120
 
 
 async def _photo_ids_from(request: Request, minimum: int, maximum: int) -> List[str]:
@@ -4162,9 +4169,13 @@ async def _run_print(image, printer_name: str):
             "sending": "Printing...",
             "finishing": "Finishing the strip...",
         }[stage])
+    limit = image.height * PRINT_SECONDS_PER_ROW + PRINT_GRACE_SECONDS
     try:
-        await mx06.print_image(image, name=printer_name, on_progress=on_progress)
+        await asyncio.wait_for(mx06.print_image(image, name=printer_name, on_progress=on_progress), limit)
         print_progress.update(status="done", message="Strip printed.")
+    except asyncio.TimeoutError:
+        logging.warning("Strip print stopped after %.0f s", limit)
+        print_progress.update(status="error", message="The print took too long and was stopped; the strip may be incomplete.")
     except Exception as e:
         template = next((t for kind, t in PRINT_FAILURES.items() if isinstance(e, kind)), "Print failed: {error}")
         logging.warning("Strip print failed: %r", e)
@@ -4180,7 +4191,7 @@ async def start_print_strip(request: Request, background_tasks: BackgroundTasks)
     paths = [os.path.join(PHOTOS_PATH, f"{photo_id}.jpg") for photo_id in ids]
     missing = [photo_id for photo_id, path in zip(ids, paths) if not os.path.isfile(path)]
     if missing:
-        raise HTTPException(status_code=400, detail=f"Photo not found: {', '.join(missing)}")
+        raise HTTPException(status_code=400, detail={"message": f"Photo not found: {', '.join(missing)}", "missing": missing})
     printer_name = settings_manager.load_settings().get("printer", {}).get("name") or "MX06"
     previous = dict(print_progress)
     # Claim the printer before the first await, so a second request cannot slip in.
@@ -4213,9 +4224,10 @@ async def delete_selected_photos(request: Request):
             if result.get("success", True):
                 deleted.append(photo_id)
             else:
-                failed.append({"id": photo_id, "error": result.get("message") or result.get("error") or "not deleted"})
+                error = result.get("message") or result.get("error") or "not deleted"
+                failed.append({"id": photo_id, "error": error, "missing": "not found" in error.lower()})
         except Exception as e:
-            failed.append({"id": photo_id, "error": str(e)})
+            failed.append({"id": photo_id, "error": str(e), "missing": False})
     return {"deleted": deleted, "failed": failed}
 
 

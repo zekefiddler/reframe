@@ -26,7 +26,7 @@ boot_config() {
     if [ -f /boot/firmware/config.txt ]; then echo /boot/firmware/config.txt; else echo /boot/config.txt; fi
 }
 
-# Returns 0 when the file changed, so a reboot is needed.
+# Returns 0 when the file changed (a reboot is needed), 1 when it needed no change, 2 on failure.
 enable_in_boot_config() {
     local config new
     config="$(boot_config)"
@@ -36,8 +36,18 @@ enable_in_boot_config() {
         rm -f "$new"
         return 1
     fi
-    sudo cp "$config" "$config.before-bluetooth"
-    sudo tee "$config" < "$new" > /dev/null   # in place: the boot partition is FAT, so no chown or rename
+    if ! sudo cp "$config" "$config.before-bluetooth"; then
+        rm -f "$new"
+        warn "could not back up $config, so it was left as it was"
+        return 2
+    fi
+    # In place: the boot partition is FAT, so no chown or rename.
+    if ! sudo tee "$config" < "$new" > /dev/null; then
+        sudo cp "$config.before-bluetooth" "$config" || true
+        rm -f "$new"
+        warn "could not write $config. It should be back as it was; check it against $config.before-bluetooth before rebooting."
+        return 2
+    fi
     rm -f "$new"
     say "Bluetooth switched back on in $config (old copy: $config.before-bluetooth)"
     return 0
@@ -68,8 +78,13 @@ main() {
         exit 1
     fi
 
-    local reboot_needed=0
-    enable_in_boot_config && reboot_needed=1
+    local reboot_needed=0 status=0
+    enable_in_boot_config || status=$?
+    case "$status" in
+        0) reboot_needed=1 ;;
+        1) ;;
+        *) exit 1 ;;
+    esac
     sudo systemctl enable --now bluetooth.service
     say "Bluetooth service enabled"
 
