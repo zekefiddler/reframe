@@ -320,6 +320,7 @@ class FakeBus:
         answer = self.answers.pop(0)
         if isinstance(answer, Exception): raise answer
         return answer
+    def close(self): self.closed = True
 
 
 def test_power_button_is_bit_0_of_the_pisugar_status_register(tmp_path, monkeypatch):
@@ -531,3 +532,39 @@ def test_update_without_sudo_rule_says_how_to_finish(dashboard, monkeypatch, tmp
     r = TestClient(dashboard.app).post("/api/update/install")
     assert r.status_code == 500
     assert f"sudo {helper}" in r.json()["detail"]
+
+
+def test_battery_level_is_read_from_the_pisugar(dashboard):
+    bus = FakeBus([87])
+    assert dashboard.read_battery_level(lambda: bus) == {"battery_level": 87, "source": "i2c"}
+    assert bus.reads == [(0x57, 0x2A)]
+    assert bus.closed                                  # read on every poll: a leaked handle adds up
+
+
+def test_battery_level_is_unavailable_without_the_pisugar(dashboard):
+    def no_bus(): raise FileNotFoundError("/dev/i2c-1")
+    assert dashboard.read_battery_level(no_bus)["battery_level"] is None
+    silent = FakeBus([OSError("no answer")])
+    assert dashboard.read_battery_level(lambda: silent)["battery_level"] is None and silent.closed
+
+
+SHIPPED_PISUGAR_OPTS = ("OPTS=\"--model 'PiSugar 3' --syslog --config config.json --uds /tmp/pisugar-server.sock "
+                        "--tcp 0.0.0.0:8423 --ws 0.0.0.0:8422 --web /usr/share/pisugar-server/web --http 0.0.0.0:8421\"\n")
+ROOT_ONLY_PISUGAR_OPTS = ("OPTS=\"--model 'PiSugar 3' --syslog --config config.json "
+                          "--uds /run/pisugar-server/pisugar-server.sock\"\n")
+
+
+@pytest.mark.parametrize("before", [
+    SHIPPED_PISUGAR_OPTS,                                           # as PiSugar's package installs it
+    SHIPPED_PISUGAR_OPTS.replace("0.0.0.0", "127.0.0.1"),           # localhost is still any local program
+    ROOT_ONLY_PISUGAR_OPTS,                                         # a second run changes nothing
+    ROOT_ONLY_PISUGAR_OPTS.replace(".sock", ".sock --uds-mode 666"),
+])
+def test_pisugar_server_keeps_no_network_port(before):
+    # pisugar-server is root and runs shell commands it is sent, with no login: nothing but
+    # root may reach it. (The socket's directory is root-only; see scripts/setup-pisugar.sh.)
+    import subprocess
+    done = subprocess.run(["bash", "-c", "source scripts/setup-pisugar.sh && root_only_server_options"],
+                          input=before, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == ROOT_ONLY_PISUGAR_OPTS

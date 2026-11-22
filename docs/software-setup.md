@@ -45,7 +45,9 @@ The camera's one button is the PiSugar 3 power button, wired out to the case as 
 - **Press while off:** turns the camera on.
 - **Hold for two seconds:** shuts the camera down cleanly, then the PiSugar cuts power.
 
-The installer runs `scripts/setup-pisugar.sh`, which turns on I2C, installs PiSugar's power manager (limited to this machine, since it has no login), and adds one sudo rule that lets the camera's user run `shutdown -h now` for the inactivity timeout. If I2C was off, the script asks for a reboot and a second run. On a camera that is already installed, run only that script: `bash scripts/setup-pisugar.sh`.
+The installer runs `scripts/setup-pisugar.sh`, which turns on I2C, installs PiSugar's power manager, and adds one sudo rule that lets the camera's user run `shutdown -h now` for the inactivity timeout. If I2C was off, the script asks for a reboot and a second run.
+
+PiSugar's power manager runs as root and runs shell commands it is sent, with no login on any of its ports or on its socket. The script therefore removes its network ports (so there is no PiSugar web page or phone app) and moves its socket into a root-only directory. The dashboard reads the battery level straight from the PiSugar over I2C. On a camera that is already installed, run only that script: `bash scripts/setup-pisugar.sh`.
 
 ## 4. Reboot
 
@@ -314,7 +316,7 @@ sudo systemctl enable --now bluetooth.service hciuart.service
 
 **Button not responding**
 - Confirm I2C is enabled: `sudo raspi-config nonint get_i2c` (should return `0`). After turning it on, reboot before the PiSugar answers
-- Check that the PiSugar answers: `echo "get battery" | nc -q 0 127.0.0.1 8423`
+- Check that the PiSugar answers: `echo "get battery" | sudo nc -U -q 0 /run/pisugar-server/pisugar-server.sock`
 - Watch for presses: `sudo journalctl -u reframe.service -f` logs "Shutter button pressed"
 - The dashboard's diagnostics show "Shutter button is not responding" while the Pi cannot read the PiSugar; the dashboard's own shutter keeps working
 

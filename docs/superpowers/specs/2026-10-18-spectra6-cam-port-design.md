@@ -194,8 +194,15 @@ of the build table, goals 1 and 6, and the first three of "Claude's calls".
   battery. **Cost:** with `soft_poweroff` on, a hung Pi cannot be turned off from
   the button; it runs until the battery is empty or the PiSugar's reset button is
   pressed inside the case.
-- **pisugar-server listens on 127.0.0.1 only**, all three ports. It has no login,
-  and its web page can change power settings.
+- **Only root can reach pisugar-server.** It runs as root and runs shell commands
+  it is sent (the long-press and button actions). Its TCP, WebSocket and web
+  ports have no login and its socket is world-writable by default, so on stock
+  settings any program on the Pi can become root; binding to 127.0.0.1 does not
+  change that. The setup script removes the three ports and moves the socket to
+  `/run/pisugar-server/` (root, 0700). If that cannot be confirmed the server is
+  stopped and disabled. **Cost:** no PiSugar web page or phone app.
+- **The dashboard reads the battery over I2C** (register 0x2A), since it can no
+  longer ask pisugar-server.
 - **The PiSugar's clock is not used.** Photo times can be wrong on a boot away from
   Wi-Fi. This board's clock address was moved to 0x69 while it was on bugoutbox.
 
@@ -208,7 +215,7 @@ of the build table, goals 1 and 6, and the first three of "Claude's calls".
 - a 2 s hold shuts down cleanly and the PiSugar's LEDs go out
 - the inactivity timeout shuts the camera down
 - the dashboard shows the battery level
-- `ss -ltn` shows 8421 to 8423 on 127.0.0.1 only
+- `ss -ltn` shows nothing on 8421 to 8423, and `/run/pisugar-server` is `root` 0700
 
 ## Reference
 

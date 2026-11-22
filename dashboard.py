@@ -3611,34 +3611,33 @@ async def get_diagnostic_logs():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HARDWARE: Battery — PiSugar 3 via pisugar-server TCP
-# Battery level is read by sending "get battery" to pisugar-server
-# on TCP port 8423. pisugar-server must be installed separately.
-# To use a different battery monitor, replace this endpoint.
-# See: https://github.com/PiSugar/PiSugar/wiki/PiSugar-Power-Manager-(Software)
+# HARDWARE: Battery — PiSugar 3 over I2C
+# The PiSugar keeps its battery percentage in register 0x2A at address 0x57.
+# It is read directly, not through pisugar-server: that server runs as root
+# and takes commands without a login, so scripts/setup-pisugar.sh leaves it
+# reachable by root only.
+# To use a different battery monitor, replace this function.
+# See: https://docs.pisugar.com/docs/product-wiki/battery/pisugar3/pisugar-3-i2c
 # ═══════════════════════════════════════════════════════════════════
-def read_battery_level():
-    """Read the PiSugar battery without blocking the dashboard event loop."""
-    import subprocess
+PISUGAR_I2C_BUS = 1
+PISUGAR_I2C_ADDRESS = 0x57
+PISUGAR_BATTERY_REGISTER = 0x2A
 
+
+def open_pisugar_bus():
+    import smbus2  # imported here so the dashboard still starts where smbus2 or I2C is missing
+    return smbus2.SMBus(PISUGAR_I2C_BUS)
+
+
+def read_battery_level(open_bus=open_pisugar_bus):
+    """Read the PiSugar's battery percentage. Blocking: call it off the event loop."""
     try:
-        result = subprocess.run(
-            ['nc', '-w', '2', '-q', '0', '127.0.0.1', '8423'],
-            input='get battery\n',
-            capture_output=True,
-            text=True,
-            timeout=3
-        )
-        if result.returncode == 0:
-            response = result.stdout.strip()
-            if response.startswith('battery:'):
-                # Handle decimal values and leading spaces
-                battery_str = response.split(':')[1].strip()
-                battery_level = int(float(battery_str))  # Convert decimal to int
-                return {"battery_level": battery_level, "source": "tcp"}
-
-        return {"battery_level": None, "source": "unknown", "error": "Could not connect to PiSugar"}
-
+        bus = open_bus()
+        try:
+            level = bus.read_byte_data(PISUGAR_I2C_ADDRESS, PISUGAR_BATTERY_REGISTER)
+        finally:
+            bus.close()
+        return {"battery_level": level, "source": "i2c"}
     except Exception as e:
         return {"battery_level": None, "source": "unknown", "error": str(e)}
 
