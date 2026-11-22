@@ -90,10 +90,13 @@ DISPLAY_IMAGE_SIZE = (DISPLAY_IMAGE_WIDTH, DISPLAY_IMAGE_HEIGHT)
 DISPLAY_PANEL_SIZE = (DISPLAY_PANEL_WIDTH, DISPLAY_PANEL_HEIGHT)
 EMPTY_ROLL_TEXT = "Take your first picture and wait for it to appear on the screen."
 BUTTON_POLL_INTERVAL_SECONDS = 0.025
-# HARDWARE: Buttons — momentary switches from each pin to GND (internal pull-ups)
-SHUTTER_PIN = 5   # header pin 29
-NEXT_PIN = 6      # header pin 31
-BUTTON_DEBOUNCE_SECONDS = 0.3
+# HARDWARE: Button — the PiSugar 3 power button doubles as the shutter.
+# https://docs.pisugar.com/docs/product-wiki/battery/pisugar3/pisugar-3-i2c
+PISUGAR_I2C_BUS = 1
+PISUGAR_I2C_ADDRESS = 0x57
+PISUGAR_STATUS_REGISTER = 0x02   # bit 0 is set while the power button is held
+LONG_PRESS_SECONDS = 2.0         # a hold this long is the PiSugar's power-off, not a photo
+BUTTON_ERROR_LOG_SECONDS = 60
 REFRESH_RETRY_SECONDS = 60  # after a failed refresh, the ticker waits this long before retrying
 
 os.makedirs(RUNTIME_PATH, exist_ok=True)
@@ -160,9 +163,6 @@ def record_service_failure(error):
             "Camera not detected. Check that the ribbon cable is fully seated "
             "and facing the correct direction at both ends."
         )
-    elif any(marker in lowered for marker in ("gpiozero", "lgpio")):
-        component = "button"
-        message = "Buttons unavailable. Check the shutter (GPIO5) and next (GPIO6) wiring."
     elif any(marker in lowered for marker in ("spi", "epd", "e-ink", "eink")):
         component = "display"
         message = "Display hardware failed to initialize. Check the display connection and SPI."
@@ -1050,7 +1050,7 @@ class ImageProcessor:
 
 
 def next_photo_id(ids, current):
-    """The photo the next button shows: the next older one, wrapping to the newest.
+    """The photo "next" shows: the next older one, wrapping to the newest.
 
     A current value that is not a photo id ("empty", None) counts as the newest showing.
     """
@@ -1318,7 +1318,7 @@ class EInkDisplay:
         refresh is never recorded as shown.
 
         Sets _display_busy=True before starting and clears it when the refresh
-        cycle completes, so every refresh blocks the shutter and next buttons the same way.
+        cycle completes, so every refresh blocks the shutter and "next" the same way.
         """
         with self._display_lock:
             if self._display_busy:
@@ -1883,17 +1883,76 @@ camera_system: Optional[CameraSystem] = None
 _operation_lock = threading.Lock()
 
 
-def handle_button_press(camera_system, button):
-    """Act on one press of the shutter or next button."""
+def open_pisugar_bus():
+    import smbus2  # imported here so the camera still starts where smbus2 or I2C is missing
+    return smbus2.SMBus(PISUGAR_I2C_BUS)
+
+
+class PowerButton:
+    """The PiSugar 3 power button, read over I2C.
+
+    A missing bus or a silent PiSugar reads as "not pressed", so the camera
+    keeps working from the dashboard; the fault shows in diagnostics and clears
+    by itself once the PiSugar answers.
+    """
+
+    def __init__(self, open_bus=open_pisugar_bus):
+        self.open_bus = open_bus
+        self.bus = None
+        self.healthy = None
+        self.last_error_log = 0.0
+
+    def pressed(self):
+        try:
+            if self.bus is None:
+                self.bus = self.open_bus()
+            status = self.bus.read_byte_data(PISUGAR_I2C_ADDRESS, PISUGAR_STATUS_REGISTER)
+        except Exception as e:
+            now = time.monotonic()
+            if self.healthy is not False:
+                update_diagnostics(
+                    "button",
+                    "Shutter button is not responding. Check the PiSugar connection and I2C.",
+                    "Shutter button stopped responding",
+                )
+            if self.healthy is not False or now - self.last_error_log >= BUTTON_ERROR_LOG_SECONDS:
+                logging.error("Failed to read the shutter button over I2C: %s", e)
+                self.last_error_log = now
+            self.healthy = False
+            return False
+        if self.healthy is False:
+            logging.info("Shutter button I2C connection recovered")
+            update_diagnostics("button", activity="Shutter button connection recovered")
+        self.healthy = True
+        return bool(status & 0x01)
+
+    def close(self):
+        if self.bus is not None:
+            self.bus.close()
+
+
+def tap_released(state, pressed, now):
+    """Feed one poll of the button; True when a short press has just been released."""
+    since = state.get("since")
+    if pressed:
+        if since is None:
+            state["since"] = now
+        return False
+    state["since"] = None
+    return since is not None and now - since < LONG_PRESS_SECONDS
+
+
+def handle_button_press(camera_system):
+    """Take a photo for one press of the shutter."""
     if camera_system.eink_display.is_busy():
-        logging.info("%s press ignored: display busy", button)
+        logging.info("Shutter press ignored: display busy")
         update_diagnostics(activity="Button press ignored while the display was refreshing")
         return {"success": False, "error": "display_busy"}
     with _operation_lock:
         camera_system.update_activity()
-        result = camera_system.next_photo() if button == "next" else camera_system.capture_photo_api()
+        result = camera_system.capture_photo_api()
     if not result.get("success"):
-        logging.warning("%s press failed: %s", button, result.get("message") or result.get("error"))
+        logging.warning("Shutter press failed: %s", result.get("message") or result.get("error"))
     return result
 
 # FastAPI application exposing hardware control over localhost (lazy initialized)
@@ -2136,40 +2195,31 @@ def main():
     camera_system.start_dashboard_qr_monitor()
 
     # ═══════════════════════════════════════════════════════════════
-    # HARDWARE: Buttons — shutter on GPIO5, next on GPIO6, each to GND.
-    # Polled on the press edge; a press while the panel refreshes is ignored.
+    # HARDWARE: Button — the PiSugar 3 power button, read over I2C.
+    # A short press takes a photo (ignored while the panel refreshes); a
+    # long press is left to the PiSugar, which powers the camera off.
+    # To use a different button, replace PowerButton.pressed().
     # ═══════════════════════════════════════════════════════════════
-    from gpiozero import Button
-    buttons = {
-        "shutter": Button(SHUTTER_PIN, pull_up=True),
-        "next": Button(NEXT_PIN, pull_up=True),
-    }
+    button = PowerButton()
+    press = {}
     camera_system.start_panel_ticker()
-    was_pressed = {name: False for name in buttons}
-    last_press = {name: 0.0 for name in buttons}
 
     logging.info("System initialized. API server running. Waiting for button presses...")
 
     try:
         while True:
-            for name, button in buttons.items():
-                pressed = button.is_pressed
-                now = time.monotonic()
-                if pressed and not was_pressed[name] and now - last_press[name] >= BUTTON_DEBOUNCE_SECONDS:
-                    last_press[name] = now
-                    logging.info("%s button pressed", name)
-                    update_diagnostics(activity=f"{name.capitalize()} button pressed")
-                    try:
-                        handle_button_press(camera_system, name)
-                    except Exception:
-                        logging.exception("%s button press failed", name)
-                was_pressed[name] = pressed
+            if tap_released(press, button.pressed(), time.monotonic()):
+                logging.info("Shutter button pressed")
+                update_diagnostics(activity="Shutter button pressed")
+                try:
+                    handle_button_press(camera_system)
+                except Exception:
+                    logging.exception("Shutter button press failed")
             sleep(BUTTON_POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logging.info("Program interrupted by user. Exiting...")
     finally:
-        for button in buttons.values():
-            button.close()
+        button.close()
         try:
             # Stop timeout monitor and put display to sleep if initialized inside CameraSystem
             if camera_system:

@@ -37,13 +37,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
-### Buttons
+### Button and power (PiSugar 3)
 
-Wire two momentary buttons from the Pi header to ground; the software turns on the internal pull-ups.
+The camera's one button is the PiSugar 3 power button, wired out to the case as the [build guide](build-guide.md) shows. The Pi reads it over I2C.
 
-- **Shutter:** GPIO5 (header pin 29) to GND (pin 30). Takes a photo and shows it.
-- **Next:** GPIO6 (header pin 31) to GND (pin 34). Steps to the next older photo, wrapping to the newest.
-- A press while the panel is refreshing is ignored.
+- **Short press:** takes a photo and shows it. A press while the panel is refreshing is ignored.
+- **Press while off:** turns the camera on.
+- **Hold for two seconds:** shuts the camera down cleanly, then the PiSugar cuts power.
+
+The installer runs `scripts/setup-pisugar.sh`, which turns on I2C, installs PiSugar's power manager (limited to this machine, since it has no login), and adds one sudo rule that lets the camera's user run `shutdown -h now` for the inactivity timeout. If I2C was off, the script asks for a reboot and a second run. On a camera that is already installed, run only that script: `bash scripts/setup-pisugar.sh`.
 
 ## 4. Reboot
 
@@ -51,7 +53,7 @@ Wire two momentary buttons from the Pi header to ground; the software turns on t
 sudo reboot
 ```
 
-After rebooting, reFrame starts automatically. The panel keeps showing the last photo (or, with no photos yet, a message asking for the first one). Press the shutter to take a photo.
+After rebooting, reFrame starts automatically. The panel keeps showing the last photo (or, with no photos yet, a message asking for the first one) until the camera joins WiFi, when it shows the dashboard QR code. Press the button to take a photo.
 
 ### Troubleshooting / Verifying the Installation
 
@@ -112,7 +114,7 @@ To use the camera without a WiFi network, enable your phone's hotspot. As long a
 
 On iPhone, you can find your hotspot name under Settings → General → About → Name. Enable **Maximize Compatibility** in hotspot settings for the Pi to connect reliably.
 
-When turned on in system settings (it is off by default), the camera shows a dashboard QR code on the ePaper display whenever it connects or reconnects to WiFi. The network watcher remains active after startup, and the QR encodes the numeric IP when one is available so it also works on hotspots that do not resolve `.local` hostnames. This behavior is enabled by default and can be disabled under system settings in the dashboard.
+The camera shows a dashboard QR code on the ePaper display whenever it connects or reconnects to WiFi, which also makes it the sign that the camera has finished booting. The network watcher remains active after startup, and the QR encodes the numeric IP when one is available so it also works on hotspots that do not resolve `.local` hostnames. This behavior is enabled by default and can be disabled under system settings in the dashboard. Away from any known WiFi network, no QR code appears.
 
 On Android/Pixel hotspots, `.local` hostnames may not resolve reliably. In that case, use the QR code's numeric IP URL, for example `http://192.168.x.x`.
 
@@ -142,11 +144,11 @@ reFrame captures each shutter-button photo into memory first so the image can be
 - The display/dashboard dithered version is saved as a PNG so the 6-color dithered image stays crisp.
 - Immediately after a capture, the dashboard may take a moment to show the newest files while the background save finishes.
 
-Auto-shutdown after inactivity is off by default. Turn it on with `system.auto_timeout_enabled` in `settings.json` (or the dashboard) and set the delay with `system.auto_timeout_minutes` (10 minutes by default). It runs `sudo shutdown`, so it needs passwordless sudo for that command.
+Auto-shutdown after inactivity is on by default, so a camera left on does not run its battery flat. Turn it off with `system.auto_timeout_enabled` in `settings.json` (or the dashboard) and set the delay with `system.auto_timeout_minutes` (10 minutes by default). It runs `sudo shutdown -h now`, which the sudo rule from `scripts/setup-pisugar.sh` allows without a password.
 
 ## Other Displays Or Cameras
 
-This build uses Raspberry Pi Camera Module 3, a Geekworm X306 UPS, two GPIO buttons, and a Waveshare 4" Spectra 6 ePaper HAT (upstream reFrame uses a PiSugar 3), but the hardware-specific code is intentionally isolated in `CameraManager`, `EInkDisplay`, and the small button block in `reframe.py`.
+This build uses Raspberry Pi Camera Module 3, a PiSugar 3 battery board, and a Waveshare 4" Spectra 6 ePaper HAT, but the hardware-specific code is intentionally isolated in `CameraManager`, `EInkDisplay`, and the small button block in `reframe.py`.
 
 See [Hardware Porting Notes](hardware-porting.md) for adapting the repo for Pimoroni, Good Display, another camera module, or a different button/power board.
 
@@ -186,6 +188,14 @@ sudo apt update
 sudo apt install -y git python3-pip python3-venv python3-picamera2 python3-spidev \
     python3-gpiozero python3-lgpio v4l-utils netcat-openbsd
 ```
+
+### PiSugar
+
+```bash
+bash scripts/setup-pisugar.sh
+```
+
+See [Button and power](#button-and-power-pisugar-3) for what it changes.
 
 ### Python Packages
 
@@ -303,8 +313,10 @@ sudo systemctl enable --now bluetooth.service hciuart.service
 - Review logs: `sudo journalctl -u reframe.service`
 
 **Button not responding**
-- Check the shutter (GPIO5, pin 29) and next (GPIO6, pin 31) wiring to GND
-- Watch for presses: `sudo journalctl -u reframe.service -f` logs "shutter button pressed" / "next button pressed"
+- Confirm I2C is enabled: `sudo raspi-config nonint get_i2c` (should return `0`). After turning it on, reboot before the PiSugar answers
+- Check that the PiSugar answers: `echo "get battery" | nc -q 0 127.0.0.1 8423`
+- Watch for presses: `sudo journalctl -u reframe.service -f` logs "Shutter button pressed"
+- The dashboard's diagnostics show "Shutter button is not responding" while the Pi cannot read the PiSugar; the dashboard's own shutter keeps working
 
 **Service won't start**
 - The installed units are filled in from `/etc/default/reframe` (`REFRAME_USER`, `REFRAME_REPO`); re-run `./install.sh` after moving the checkout

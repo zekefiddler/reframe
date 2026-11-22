@@ -30,8 +30,8 @@ DEFAULT_SETTINGS = {
     "system": {
         "auto_refresh_interval": 30,
         "auto_timeout_minutes": 10,
-        "auto_timeout_enabled": False,
-        "show_dashboard_qr_on_wifi_connect": False,
+        "auto_timeout_enabled": True,
+        "show_dashboard_qr_on_wifi_connect": True,
         "camera_name": ""
     },
     "exports": {

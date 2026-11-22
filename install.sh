@@ -72,6 +72,11 @@ else
     info "Camera auto-detect already enabled"
 fi
 
+# I2C, PiSugar's power manager and the shutdown permission. A camera without a
+# PiSugar still works from the dashboard, so a failure here is not fatal.
+bash "$SCRIPT_DIR/scripts/setup-pisugar.sh" \
+    || warn "PiSugar setup did not finish. Run it again later: bash $SCRIPT_DIR/scripts/setup-pisugar.sh"
+
 # ── 3. Boot-speed hardware trims ────────────
 step "Applying boot-speed hardware trims"
 

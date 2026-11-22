@@ -13,8 +13,8 @@ def test_spectra6_defaults():
     assert d["display"]["orientation"] == "landscape" and d["display"]["portrait_rotation"] == 90
     assert d["display"]["slideshow_interval_seconds"] == 0
     assert d["camera"]["rotate_180"] is False and d["camera"]["autofocus_mode"] == 2
-    assert d["system"]["auto_timeout_enabled"] is False
-    assert d["system"]["show_dashboard_qr_on_wifi_connect"] is False
+    assert d["system"]["auto_timeout_enabled"] is True                  # on battery: don't run flat
+    assert d["system"]["show_dashboard_qr_on_wifi_connect"] is True     # the QR is the "ready" sign at boot
 
 
 def test_merge_keeps_saved_and_fills_missing():
@@ -288,17 +288,61 @@ def test_delete_all_ends_on_empty_roll(system):
 
 def test_shutter_press_ignored_while_busy(system):
     system.eink_display._display_busy = True
-    assert reframe.handle_button_press(system, "shutter")["error"] == "display_busy"
+    assert reframe.handle_button_press(system)["error"] == "display_busy"
     assert system.file_manager.photo_ids() == [] and frames(system) == []
 
 
-def test_shutter_and_next_presses(system):
-    reframe.handle_button_press(system, "shutter"); settle(system)
+def test_shutter_press_shows_a_new_photo(system):
+    reframe.handle_button_press(system); settle(system)
     first = system.panel_showing
-    reframe.handle_button_press(system, "shutter"); settle(system)
-    assert system.panel_showing != first
-    reframe.handle_button_press(system, "next"); settle(system)
-    assert system.panel_showing == first
+    reframe.handle_button_press(system); settle(system)
+    assert len(system.file_manager.photo_ids()) == 2
+    assert system.panel_showing in system.file_manager.photo_ids() and system.panel_showing != first
+
+
+@pytest.mark.parametrize("polls,want", [
+    ([(0.0, True), (0.3, True), (0.4, False)], [False, False, True]),   # fires on release, not on press
+    ([(0.0, True), (0.2, False), (0.3, False)], [False, True, False]),  # and only once
+    ([(0.0, True), (2.5, False)], [False, False]),                      # a hold is the PiSugar's power-off
+    ([(0.0, True), (2.0, False)], [False, False]),                      # ...from exactly two seconds
+    ([(0.0, False), (0.1, False)], [False, False]),                     # idle
+])
+def test_tap_is_a_short_press_seen_at_release(polls, want):
+    state = {}
+    assert [reframe.tap_released(state, pressed, now) for now, pressed in polls] == want
+
+
+class FakeBus:
+    """An I2C bus that answers register reads from a list; an exception in the list is raised."""
+    def __init__(self, answers): self.answers, self.reads = list(answers), []
+    def read_byte_data(self, address, register):
+        self.reads.append((address, register))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception): raise answer
+        return answer
+
+
+def test_power_button_is_bit_0_of_the_pisugar_status_register(tmp_path, monkeypatch):
+    monkeypatch.setattr(reframe, "DIAGNOSTICS_PATH", str(tmp_path / "diagnostics.json"))
+    bus = FakeBus([0b10000101, 0b10000100])
+    button = reframe.PowerButton(lambda: bus)
+    assert [button.pressed(), button.pressed()] == [True, False]
+    assert bus.reads == [(0x57, 0x02), (0x57, 0x02)]
+
+
+def test_power_button_without_i2c_is_not_pressed_and_recovers(tmp_path, monkeypatch):
+    monkeypatch.setattr(reframe, "DIAGNOSTICS_PATH", str(tmp_path / "diagnostics.json"))
+    buses = [FileNotFoundError("/dev/i2c-1"), FakeBus([OSError("no answer"), 0x01])]
+    def open_bus():
+        bus = buses.pop(0)
+        if isinstance(bus, Exception): raise bus
+        return bus
+    button = reframe.PowerButton(open_bus)
+    assert button.pressed() is False                          # I2C is off: no crash, no press
+    assert "PiSugar" in reframe.get_diagnostics()["issues"]["button"]
+    assert button.pressed() is False                          # bus opens, the PiSugar does not answer
+    assert button.pressed() is True                           # answers: works without a restart
+    assert "button" not in reframe.get_diagnostics()["issues"]
 
 
 class FakePicam:
@@ -336,7 +380,7 @@ def test_unreadable_photo_is_skipped_not_fatal(system):
     with open(os.path.join(reframe.SAVE_PATH, f"{p2}.jpg"), "r+b") as f:
         f.truncate(200)                                                 # power cut mid-save
     os.remove(os.path.join(reframe.PROCESSED_PATH, f"{p2}_dithered.png"))
-    assert reframe.handle_button_press(system, "next")["success"]; settle(system)
+    assert system.next_photo()["success"]; settle(system)
     assert system.panel_showing == p1
     system.camera_manager.settings["display"]["slideshow_interval_seconds"] = 60
     system._set_panel_showing(p3)
@@ -463,9 +507,13 @@ def test_automatic_refresh_backs_off_when_every_photo_is_unreadable(system, monk
     assert system.next_photo()["error"] == "unreadable"                   # a manual press still tries
 
 
-def test_installer_grants_no_passwordless_sudo():
-    # Owner's ruling: the helper installs files the login user can write, so no NOPASSWD rule.
-    assert "NOPASSWD" not in open("install.sh").read()
+def test_only_passwordless_command_is_shutdown():
+    # Owner's rulings: the inactivity shutdown may power off without a password, and nothing
+    # else may. Above all not the update helper, which installs files the login user can write.
+    rules = [line.strip() for path in ("install.sh", "scripts/setup-pisugar.sh", "scripts/reframe-apply-update")
+             for line in open(path) if "NOPASSWD" in line and not line.lstrip().startswith("#")]
+    assert len(rules) == 1
+    assert rules[0].endswith('ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now" > "$rule"')
 
 
 def test_update_without_sudo_rule_says_how_to_finish(dashboard, monkeypatch, tmp_path):

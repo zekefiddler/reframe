@@ -2,7 +2,8 @@
 
 Fork of [kaloyaan/reframe](https://github.com/kaloyaan/reframe) at `e86aebc`.
 Tracking: [Epaper-Screens#3](https://github.com/zekefiddler/Epaper-Screens/issues/3).
-Status: design, 2026-10-18.
+Status: design, 2026-10-18. **Amended 2026-11-21: the power board and buttons
+changed; see the amendment at the end, which overrides the sections it names.**
 
 ## Intent
 
@@ -153,6 +154,61 @@ need.
   - empty roll shows the message
   - the dashboard downloads an original
   - the network (Wi-Fi, Tailscale, USB) still works after install and a reboot
+
+## Amendment 2026-11-21: PiSugar 3, one button
+
+The hardware moved back to upstream's. This overrides the "Power and button" row
+of the build table, goals 1 and 6, and the first three of "Claude's calls".
+
+**What changed on the bench (Zeke)**
+- The Pi sits on a **PiSugar 3** (1200 mAh, the board that used to power
+  bugoutbox). The Geekworm X306 is out.
+- **The next button is dropped.** Older photos are reached from the dashboard or the
+  slideshow. `next_photo()` and `/api/next` stay.
+- The case is **upstream's, unmodified**, wired as the build guide shows: the case
+  button goes to the PiSugar's power-button pad (pad 10, the unlabelled pad by the
+  reset button, not the one marked "BTN") and BAT+.
+- The 4" HAT goes back on the Pi's header, as the case needs.
+
+**Zeke's calls**
+- **No startup photo.** The panel shows the **dashboard QR when the camera joins
+  Wi-Fi**, and that is the sign it has booted. `show_dashboard_qr_on_wifi_connect`
+  now defaults to on.
+- **The camera may power itself off.** One sudo rule lets the camera's user run
+  exactly `/usr/sbin/shutdown -h now` without a password. The update helper still
+  gets no rule.
+
+**Claude's calls (not confirmed by Zeke)**
+- **Shutter = the PiSugar power button over I2C** (0x57, register 0x02, bit 0), as
+  upstream. A press shorter than 2 s takes a photo; a longer one is left to the
+  PiSugar.
+- **A missing bus or a silent PiSugar must not stop the camera.** The button reads
+  as "not pressed", diagnostics say so, and the dashboard shutter keeps working.
+  Upstream opens the bus at startup and dies without it.
+- **`auto_timeout_enabled` defaults to on** (10 minutes), as upstream.
+- **PiSugar setup lives in `scripts/setup-pisugar.sh`**, which install.sh calls. On
+  the installed Pi only that script is run: re-running all of install.sh risks the
+  network profiles again (see "Anti-goals").
+- **PiSugar settings:** one press powers on (`anti_mistouch` off); a long press
+  runs a clean shutdown (`soft_poweroff` on); `pisugar-poweroff` then cuts the
+  battery. **Cost:** with `soft_poweroff` on, a hung Pi cannot be turned off from
+  the button; it runs until the battery is empty or the PiSugar's reset button is
+  pressed inside the case.
+- **pisugar-server listens on 127.0.0.1 only**, all three ports. It has no login,
+  and its web page can change power settings.
+- **The PiSugar's clock is not used.** Photo times can be wrong on a boot away from
+  Wi-Fi. This board's clock address was moved to 0x69 while it was on bugoutbox.
+
+**Open**
+- Away from Wi-Fi nothing appears at boot, so there is no "ready" sign there.
+
+**On-device checks to add**
+- one press powers on; the QR appears once Wi-Fi is up
+- a short press takes a photo; a press during a refresh is ignored
+- a 2 s hold shuts down cleanly and the PiSugar's LEDs go out
+- the inactivity timeout shuts the camera down
+- the dashboard shows the battery level
+- `ss -ltn` shows 8421 to 8423 on 127.0.0.1 only
 
 ## Reference
 

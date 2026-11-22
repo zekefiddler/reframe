@@ -28,10 +28,11 @@ To port another camera:
 
 ## Button And Power
 
-The default button path reads PiSugar 3 over I2C in `main()`. To port another trigger:
+The default button path reads the PiSugar 3 power button over I2C (`PowerButton` in `reframe.py`). To port another trigger:
 
-- Replace `is_power_button_pressed()` in `main()`.
-- Keep the short-press behavior calling `camera_system.capture_photo_api()`.
+- Replace `PowerButton.pressed()` so it returns whether your button is held.
+- Keep the short-press behavior calling `handle_button_press()`, which takes the photo.
+- Skip `scripts/setup-pisugar.sh` in `install.sh`; it is specific to the PiSugar.
 - Keep long-press shutdown behavior in the power manager if your hardware has one; otherwise implement it explicitly.
 
 ## Dashboard
