@@ -882,3 +882,24 @@ def test_an_unreadable_photo_does_not_leave_the_printer_claimed(strip_app):
     (strip_app.photos / "00059.jpg").write_bytes(b"")
     assert start_print(strip_app, ["00059"]).status_code == 400
     assert start_print(strip_app, ["00001"]).status_code == 200
+
+
+def test_dashboard_has_select_mode_controls(dashboard):
+    from fastapi.testclient import TestClient
+    html = TestClient(dashboard.app).get("/").text
+    for needle in ('id="select-btn"', 'id="select-bar"', 'id="print-strip-btn"', 'id="delete-selected-btn"',
+                   'id="select-cancel-btn"', 'id="print-status"', "/api/print-strip/start", "/api/photos/delete"):
+        assert needle in html
+
+
+def test_dashboard_script_is_valid_javascript(dashboard, tmp_path):
+    import re, shutil, subprocess
+    from fastapi.testclient import TestClient
+    if not shutil.which("node"): pytest.skip("node is not installed")
+    html = TestClient(dashboard.app).get("/").text
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts
+    for i, script in enumerate(scripts):
+        f = tmp_path / f"s{i}.js"; f.write_text(script)
+        done = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr

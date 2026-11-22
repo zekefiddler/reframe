@@ -1113,6 +1113,51 @@ async def dashboard():
                 }
             }
             
+            .select-bar {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 10px;
+                margin: 0 0 16px;
+            }
+
+            .print-status:empty {
+                display: none;
+            }
+
+            .print-status {
+                margin: 0 0 16px;
+            }
+
+            .photo-grid.selecting .photo-info {
+                display: none;
+            }
+
+            .photo-grid.selecting .photo-card {
+                cursor: pointer;
+            }
+
+            .photo-card.picked {
+                outline: 4px solid var(--text-color, #000);
+                outline-offset: -4px;
+            }
+
+            .pick-badge {
+                position: absolute;
+                top: 8px;
+                left: 8px;
+                min-width: 32px;
+                height: 32px;
+                padding: 0 6px;
+                border-radius: 16px;
+                background: #000;
+                color: #fff;
+                font-weight: bold;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
             .photo-actions {
                 display: flex;
                 gap: 8px;
@@ -1588,10 +1633,19 @@ async def dashboard():
                     <button class="button" onclick="refreshGallery()">refresh</button>
                 </div>
                 <button class="button" onclick="capturePhoto()">capture photo</button>
+                <button class="button" id="select-btn" onclick="toggleSelectMode()">select</button>
                 <button class="button" onclick="openSettings()">settings</button>
             </div>
             </div>
             
+            <div id="select-bar" class="select-bar" style="display: none;">
+                <span id="select-count">tap photos to pick them</span>
+                <button class="button" id="print-strip-btn" onclick="printStrip()" disabled>print strip</button>
+                <button class="button danger-btn" id="delete-selected-btn" onclick="deleteSelected()" disabled>delete</button>
+                <button class="button" id="select-cancel-btn" onclick="toggleSelectMode()">cancel</button>
+            </div>
+            <div id="print-status" class="print-status" role="status" aria-live="polite"></div>
+
             <div class="gallery">
                 <div id="photo-grid" class="photo-grid">
                     <div class="loading">loading photos...</div>
@@ -2091,6 +2145,7 @@ async def dashboard():
                 
                 // Add click handlers for photo cards
                 setupPhotoCardHandlers();
+                applySelection();
             }
 
             function renderExtensionButtons(photo) {
@@ -2231,6 +2286,11 @@ async def dashboard():
                     
                     // Handle click/tap events
                     card.addEventListener('click', function(e) {
+                        if (selectMode) {
+                            e.preventDefault();
+                            togglePick(card.getAttribute('data-photo-id'));
+                            return;
+                        }
                         const currentTime = new Date().getTime();
                         const tapLength = currentTime - lastTap;
                         
@@ -2288,6 +2348,129 @@ async def dashboard():
                 return `${size.toFixed(1)} ${units[unitIndex]}`;
             }
             
+            // ── Select mode: pick photos to print as a strip or to delete ──
+            const MAX_STRIP_PHOTOS = 8;
+            let selectMode = false;
+            let selectedIds = [];   // in the order tapped; survives paging and refreshes
+            let printPoll = null;
+
+            function toggleSelectMode() {
+                selectMode = !selectMode;
+                selectedIds = [];
+                document.getElementById('select-bar').style.display = selectMode ? 'flex' : 'none';
+                document.getElementById('select-btn').textContent = selectMode ? 'done selecting' : 'select';
+                document.getElementById('photo-grid').classList.toggle('selecting', selectMode);
+                document.querySelectorAll('.photo-card.active').forEach(card => card.classList.remove('active'));
+                applySelection();
+            }
+
+            function togglePick(photoId) {
+                const at = selectedIds.indexOf(photoId);
+                if (at === -1) {
+                    selectedIds.push(photoId);
+                } else {
+                    selectedIds.splice(at, 1);
+                }
+                applySelection();
+            }
+
+            function applySelection() {
+                document.querySelectorAll('.photo-card').forEach(card => {
+                    const position = selectedIds.indexOf(card.getAttribute('data-photo-id'));
+                    let badge = card.querySelector('.pick-badge');
+                    card.classList.toggle('picked', position !== -1);
+                    if (position === -1) {
+                        if (badge) badge.remove();
+                        return;
+                    }
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'pick-badge';
+                        card.appendChild(badge);
+                    }
+                    badge.textContent = String(position + 1);
+                });
+                const count = selectedIds.length;
+                const label = document.getElementById('select-count');
+                if (count === 0) {
+                    label.textContent = 'tap photos to pick them';
+                } else if (count > MAX_STRIP_PHOTOS) {
+                    label.textContent = `${count} selected (a strip holds up to ${MAX_STRIP_PHOTOS} photos)`;
+                } else {
+                    label.textContent = `${count} selected`;
+                }
+                document.getElementById('print-strip-btn').disabled = count === 0 || count > MAX_STRIP_PHOTOS;
+                document.getElementById('delete-selected-btn').disabled = count === 0;
+            }
+
+            function showPrintStatus(text) {
+                document.getElementById('print-status').textContent = text;
+            }
+
+            async function printStrip() {
+                notifyUserActivity();
+                const button = document.getElementById('print-strip-btn');
+                button.disabled = true;
+                try {
+                    const response = await fetch('/api/print-strip/start', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({photo_ids: selectedIds})
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        showPrintStatus(data.detail || 'The strip could not be started.');
+                        applySelection();
+                        return;
+                    }
+                    showPrintStatus('Looking for the printer...');
+                    clearInterval(printPoll);
+                    printPoll = setInterval(async () => {
+                        try {
+                            const progress = await (await fetch('/api/print-strip/progress')).json();
+                            showPrintStatus(progress.message || progress.status);
+                            if (progress.status === 'done' || progress.status === 'error') {
+                                clearInterval(printPoll);
+                                applySelection();
+                            }
+                        } catch (error) {
+                            showPrintStatus('Lost contact with the camera while printing.');
+                        }
+                    }, 1000);
+                } catch (error) {
+                    showPrintStatus('Could not reach the camera.');
+                    applySelection();
+                }
+            }
+
+            async function deleteSelected() {
+                const count = selectedIds.length;
+                if (count === 0) return;
+                if (!confirm(`Delete ${count} photo${count === 1 ? '' : 's'}? This cannot be undone.`)) return;
+                notifyUserActivity();
+                try {
+                    const response = await fetch('/api/photos/delete', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({photo_ids: selectedIds})
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        showPrintStatus(data.detail || 'The photos could not be deleted.');
+                        return;
+                    }
+                    const failed = data.failed || [];
+                    showPrintStatus(failed.length
+                        ? `Deleted ${data.deleted.length}; could not delete ${failed.map(f => f.id).join(', ')}.`
+                        : `Deleted ${data.deleted.length} photo${data.deleted.length === 1 ? '' : 's'}.`);
+                    selectedIds = failed.map(f => f.id);
+                    await loadPhotos(currentPage);
+                    applySelection();
+                } catch (error) {
+                    showPrintStatus('Could not reach the camera.');
+                }
+            }
+
             function viewPhoto(photoId) {
                 notifyUserActivity(); // Track photo viewing
                 const photo = photos.find(p => p.id === photoId);
