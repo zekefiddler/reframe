@@ -676,3 +676,75 @@ def test_a_job_opens_and_closes_the_way_the_printer_expects():
 def test_a_job_refuses_an_image_of_the_wrong_width():
     import mx06
     with pytest.raises(ValueError): mx06.build_job(Image.new("1", (400, 2), 1))
+
+
+class FakePrinter:
+    """Stands in for a connected bleak client. `script` maps a write count to notifications fired after that write."""
+    mtu_size = 103                                   # chunks of 100
+    def __init__(self, script=None, fail_at=None): self.script, self.fail_at, self.writes, self.notify = script or {}, fail_at, [], None
+    async def start_notify(self, uuid, callback): self.notify = callback
+    async def write_gatt_char(self, uuid, data, response=False):
+        if self.fail_at is not None and len(self.writes) >= self.fail_at: raise OSError("not connected")
+        self.writes.append(bytes(data))
+        for note in self.script.get(len(self.writes), []): self.notify(uuid, bytearray(note))
+
+
+STATE = bytes.fromhex("5178a3010300000200aaff")
+
+
+def test_sender_waits_while_the_printer_says_pause():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 2: [mx06.PAUSE], 5: [STATE]})
+    async def run():
+        task = asyncio.create_task(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=1))
+        await asyncio.sleep(0.2); held = len(p.writes)
+        p.notify(None, bytearray(mx06.RESUME)); await task
+        return held
+    assert asyncio.run(run()) == 2 and len(p.writes) == 5        # nothing sent between pause and resume
+    assert b"".join(p.writes) == bytes(500)
+
+
+def test_sender_gives_up_when_the_printer_never_resumes():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 2: [mx06.PAUSE]})
+    with pytest.raises(mx06.PrintTimedOut):
+        asyncio.run(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=1, pause_timeout=0.2))
+
+
+def test_sender_finishes_at_the_second_state_reply_not_at_resume():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 5: [mx06.RESUME]})                # every byte sent, but no closing reply
+    with pytest.raises(mx06.PrintTimedOut): asyncio.run(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=0.2))
+
+
+def test_sender_reports_a_printer_that_drops_off():
+    import mx06, asyncio
+    with pytest.raises(mx06.PrinterLost): asyncio.run(mx06.send_job(FakePrinter({1: [STATE]}, fail_at=2), bytes(500), rows=10, chunk_gap=0, closing_timeout=1))
+
+
+def test_print_image_says_when_the_printer_is_not_found_after_two_scans():
+    import mx06, asyncio
+    scans = []
+    async def nothing(name, timeout): scans.append(name); return None
+    with pytest.raises(mx06.PrinterNotFound): asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=nothing))
+    assert scans == ["MX06", "MX06"]
+
+
+def test_print_image_reports_progress_to_the_end():
+    import mx06, asyncio, contextlib
+    p = FakePrinter({1: [STATE], 2: [STATE]}); stages = []
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield p
+    asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect,
+                                 on_progress=lambda stage, sent, total: stages.append(stage)))
+    assert stages[0] == "scanning" and "sending" in stages and stages[-1] == "finishing"
+    assert b"".join(p.writes) == mx06.build_job(Image.new("1", (384, 2), 1))[0]
+
+
+def test_print_image_says_bluetooth_is_unavailable_instead_of_a_traceback():
+    import mx06, asyncio
+    async def broken(name, timeout): raise RuntimeError("org.bluez.Error.NotReady")
+    with pytest.raises(mx06.BluetoothUnavailable) as e:
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=broken))
+    assert "NotReady" in str(e.value)

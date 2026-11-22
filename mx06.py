@@ -5,6 +5,10 @@ to characteristic AE01, replies on AE02. The command bytes follow
 rbaron/catprinter (MIT); the pause/resume flow control follows
 NaitLee/Cat-Printer. See docs/superpowers/specs/2026-11-21-photo-strip-and-delete-design.md.
 """
+import asyncio
+import contextlib
+import logging
+
 WIDTH = 384
 QUALITY = 0x32
 FEED_LINES = 25
@@ -72,3 +76,120 @@ def build_job(image, energy=0xFFFF):
         + command(0xA3, b"\x00")
     )
     return bytes(data), image.height
+
+
+# ── Sending over Bluetooth LE ─────────────────────────────────────────────────
+
+NAME = "MX06"
+TX = "0000ae01-0000-1000-8000-00805f9b34fb"   # commands, written without response
+RX = "0000ae02-0000-1000-8000-00805f9b34fb"   # replies and pause/resume
+SCAN_ATTEMPTS = 2   # single 10 s scans missed a nearby MX06 on the Pi 2 times in 5
+PAUSE_TIMEOUT_SECONDS = 30
+
+
+class PrinterNotFound(Exception):
+    pass
+
+
+class PrintTimedOut(Exception):
+    pass
+
+
+class PrinterLost(Exception):
+    pass
+
+
+class BluetoothUnavailable(Exception):
+    pass
+
+
+async def send_job(client, data, rows, on_progress=None, chunk_gap=0.02, closing_timeout=None,
+                   pause_timeout=PAUSE_TIMEOUT_SECONDS):
+    """Send a job to a connected printer, waiting whenever it says pause.
+
+    Done is the printer's reply to the job's closing state query: the second
+    state reply of the job. RESUME looks like "ready" but is not the end.
+    """
+    paused = asyncio.Event()
+    finished = asyncio.Event()
+    state_replies = 0
+
+    def on_reply(_sender, payload):
+        nonlocal state_replies
+        payload = bytes(payload)
+        if payload == PAUSE:
+            paused.set()
+        elif payload == RESUME:
+            paused.clear()
+        elif payload.startswith(STATE_REPLY_PREFIX):
+            state_replies += 1
+            if state_replies >= 2:
+                finished.set()
+
+    await client.start_notify(RX, on_reply)
+    size = client.mtu_size - 3
+    for start in range(0, len(data), size):
+        waited = 0.0
+        while paused.is_set():
+            if waited >= pause_timeout:
+                raise PrintTimedOut(f"the printer paused and did not resume within {pause_timeout:.0f} s")
+            await asyncio.sleep(0.05)
+            waited += 0.05
+        try:
+            await client.write_gatt_char(TX, data[start:start + size], response=False)
+        except Exception as e:
+            raise PrinterLost(str(e)) from e
+        if on_progress:
+            on_progress("sending", min(start + size, len(data)), len(data))
+        await asyncio.sleep(chunk_gap)
+    if on_progress:
+        on_progress("finishing", len(data), len(data))
+    limit = rows / 30 + 20 if closing_timeout is None else closing_timeout
+    try:
+        await asyncio.wait_for(finished.wait(), limit)
+    except asyncio.TimeoutError:
+        raise PrintTimedOut(f"no reply from the printer within {limit:.0f} s after sending") from None
+
+
+async def _scan(name, timeout):
+    from bleak import BleakScanner
+    return await BleakScanner.find_device_by_filter(lambda d, ad: (d.name or "") == name, timeout=timeout)
+
+
+@contextlib.asynccontextmanager
+async def _connect(device):
+    from bleak import BleakClient
+    async with BleakClient(device) as client:
+        backend = getattr(client, "_backend", None)
+        if type(backend).__name__ == "BleakClientBlueZDBus":
+            await backend._acquire_mtu()   # BlueZ reports an MTU of 23 until asked (found on the Pi)
+        yield client
+
+
+async def print_image(image, name=NAME, on_progress=None, scan_timeout=10.0, find_device=None, connect=None):
+    """Find the printer by name, connect, and print a 384 px wide image."""
+    data, rows = build_job(image)
+    find_device = find_device or _scan
+    connect = connect or _connect
+    try:
+        device = None
+        for _ in range(SCAN_ATTEMPTS):
+            if on_progress:
+                on_progress("scanning", 0, len(data))
+            device = await find_device(name, scan_timeout)
+            if device is not None:
+                break
+        if device is None:
+            raise PrinterNotFound(f"no printer named {name} found")
+        printed = False
+        async with connect(device) as client:
+            await send_job(client, data, rows, on_progress)
+            printed = True
+    except (PrinterNotFound, PrintTimedOut, PrinterLost):
+        raise
+    except Exception as e:
+        if printed:   # the strip is out; a failed disconnect afterwards does not matter
+            logging.warning("Printer disconnect failed after a finished print: %s", e)
+            return
+        logging.exception("Bluetooth error while printing")
+        raise BluetoothUnavailable(f"{type(e).__name__}: {e}") from e
