@@ -171,6 +171,7 @@ async def print_image(image, name=NAME, on_progress=None, scan_timeout=10.0, fin
     data, rows = build_job(image)
     find_device = find_device or _scan
     connect = connect or _connect
+    printed = False
     try:
         device = None
         for _ in range(SCAN_ATTEMPTS):
@@ -181,7 +182,6 @@ async def print_image(image, name=NAME, on_progress=None, scan_timeout=10.0, fin
                 break
         if device is None:
             raise PrinterNotFound(f"no printer named {name} found")
-        printed = False
         async with connect(device) as client:
             await send_job(client, data, rows, on_progress)
             printed = True
