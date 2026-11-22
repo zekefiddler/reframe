@@ -21,6 +21,8 @@ import httpx
 from PIL import Image
 
 from settings_defaults import merge_defaults
+import mx06
+import photostrip
 
 CAMERA_AVAILABLE = False
 
@@ -226,6 +228,11 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     boolean(arena.get("enabled"), "extensions.arena.enabled")
     text(arena.get("channel", ""), "extensions.arena.channel", 200)
     text(arena.get("access_token", ""), "extensions.arena.access_token", 4096)
+
+    printer = section(settings, "printer", "printer")
+    text(printer.get("name"), "printer.name", 32)
+    if not printer.get("name"):
+        raise SettingsValidationError("printer.name cannot be empty")
 
 class SettingsManager:
     """Manages settings operations for the dashboard."""
@@ -1106,6 +1113,51 @@ async def dashboard():
                 }
             }
             
+            .select-bar {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 10px;
+                margin: 0 0 16px;
+            }
+
+            .print-status:empty {
+                display: none;
+            }
+
+            .print-status {
+                margin: 0 0 16px;
+            }
+
+            .photo-grid.selecting .photo-info {
+                display: none;
+            }
+
+            .photo-grid.selecting .photo-card {
+                cursor: pointer;
+            }
+
+            .photo-card.picked {
+                outline: 4px solid var(--text-color, #000);
+                outline-offset: -4px;
+            }
+
+            .pick-badge {
+                position: absolute;
+                top: 8px;
+                left: 8px;
+                min-width: 32px;
+                height: 32px;
+                padding: 0 6px;
+                border-radius: 16px;
+                background: #000;
+                color: #fff;
+                font-weight: bold;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
             .photo-actions {
                 display: flex;
                 gap: 8px;
@@ -1581,10 +1633,19 @@ async def dashboard():
                     <button class="button" onclick="refreshGallery()">refresh</button>
                 </div>
                 <button class="button" onclick="capturePhoto()">capture photo</button>
+                <button class="button" id="select-btn" onclick="toggleSelectMode()">select</button>
                 <button class="button" onclick="openSettings()">settings</button>
             </div>
             </div>
             
+            <div id="select-bar" class="select-bar" style="display: none;">
+                <span id="select-count">tap photos to pick them</span>
+                <button class="button" id="print-strip-btn" onclick="printStrip()" disabled>print strip</button>
+                <button class="button danger-btn" id="delete-selected-btn" onclick="deleteSelected()" disabled>delete</button>
+                <button class="button" id="select-cancel-btn" onclick="toggleSelectMode()">cancel</button>
+            </div>
+            <div id="print-status" class="print-status" role="status" aria-live="polite"></div>
+
             <div class="gallery">
                 <div id="photo-grid" class="photo-grid">
                     <div class="loading">loading photos...</div>
@@ -2084,6 +2145,7 @@ async def dashboard():
                 
                 // Add click handlers for photo cards
                 setupPhotoCardHandlers();
+                applySelection();
             }
 
             function renderExtensionButtons(photo) {
@@ -2224,6 +2286,11 @@ async def dashboard():
                     
                     // Handle click/tap events
                     card.addEventListener('click', function(e) {
+                        if (selectMode) {
+                            e.preventDefault();
+                            togglePick(card.getAttribute('data-photo-id'));
+                            return;
+                        }
                         const currentTime = new Date().getTime();
                         const tapLength = currentTime - lastTap;
                         
@@ -2281,6 +2348,133 @@ async def dashboard():
                 return `${size.toFixed(1)} ${units[unitIndex]}`;
             }
             
+            // ── Select mode: pick photos to print as a strip or to delete ──
+            const MAX_STRIP_PHOTOS = 8;
+            let selectMode = false;
+            let selectedIds = [];   // in the order tapped; survives paging and refreshes
+            let printPoll = null;
+
+            function toggleSelectMode() {
+                selectMode = !selectMode;
+                selectedIds = [];
+                document.getElementById('select-bar').style.display = selectMode ? 'flex' : 'none';
+                document.getElementById('select-btn').textContent = selectMode ? 'done selecting' : 'select';
+                document.getElementById('photo-grid').classList.toggle('selecting', selectMode);
+                document.querySelectorAll('.photo-card.active').forEach(card => card.classList.remove('active'));
+                applySelection();
+            }
+
+            function togglePick(photoId) {
+                const at = selectedIds.indexOf(photoId);
+                if (at === -1) {
+                    selectedIds.push(photoId);
+                } else {
+                    selectedIds.splice(at, 1);
+                }
+                applySelection();
+            }
+
+            function applySelection() {
+                document.querySelectorAll('.photo-card').forEach(card => {
+                    const position = selectedIds.indexOf(card.getAttribute('data-photo-id'));
+                    let badge = card.querySelector('.pick-badge');
+                    card.classList.toggle('picked', position !== -1);
+                    if (position === -1) {
+                        if (badge) badge.remove();
+                        return;
+                    }
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'pick-badge';
+                        card.appendChild(badge);
+                    }
+                    badge.textContent = String(position + 1);
+                });
+                const count = selectedIds.length;
+                const label = document.getElementById('select-count');
+                if (count === 0) {
+                    label.textContent = 'tap photos to pick them';
+                } else if (count > MAX_STRIP_PHOTOS) {
+                    label.textContent = `${count} selected (a strip holds up to ${MAX_STRIP_PHOTOS} photos)`;
+                } else {
+                    label.textContent = `${count} selected`;
+                }
+                document.getElementById('print-strip-btn').disabled = count === 0 || count > MAX_STRIP_PHOTOS;
+                document.getElementById('delete-selected-btn').disabled = count === 0;
+            }
+
+            function showPrintStatus(text) {
+                document.getElementById('print-status').textContent = text;
+            }
+
+            async function printStrip() {
+                notifyUserActivity();
+                const button = document.getElementById('print-strip-btn');
+                button.disabled = true;
+                try {
+                    const response = await fetch('/api/print-strip/start', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({photo_ids: selectedIds})
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        const detail = data.detail;
+                        if (detail && Array.isArray(detail.missing)) {
+                            selectedIds = selectedIds.filter(id => !detail.missing.includes(id));
+                        }
+                        showPrintStatus((detail && detail.message) || detail || 'The strip could not be started.');
+                        applySelection();
+                        return;
+                    }
+                    showPrintStatus('Looking for the printer...');
+                    clearInterval(printPoll);
+                    printPoll = setInterval(async () => {
+                        try {
+                            const progress = await (await fetch('/api/print-strip/progress')).json();
+                            showPrintStatus(progress.message || progress.status);
+                            if (progress.status === 'done' || progress.status === 'error') {
+                                clearInterval(printPoll);
+                                applySelection();
+                            }
+                        } catch (error) {
+                            showPrintStatus('Lost contact with the camera while printing.');
+                        }
+                    }, 1000);
+                } catch (error) {
+                    showPrintStatus('Could not reach the camera.');
+                    applySelection();
+                }
+            }
+
+            async function deleteSelected() {
+                const count = selectedIds.length;
+                if (count === 0) return;
+                if (!confirm(`Delete ${count} photo${count === 1 ? '' : 's'}? This cannot be undone.`)) return;
+                notifyUserActivity();
+                try {
+                    const response = await fetch('/api/photos/delete', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({photo_ids: selectedIds})
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        showPrintStatus(data.detail || 'The photos could not be deleted.');
+                        return;
+                    }
+                    const failed = data.failed || [];
+                    showPrintStatus(failed.length
+                        ? `Deleted ${data.deleted.length}; could not delete ${failed.map(f => f.id).join(', ')}.`
+                        : `Deleted ${data.deleted.length} photo${data.deleted.length === 1 ? '' : 's'}.`);
+                    selectedIds = failed.filter(f => !f.missing).map(f => f.id);   // keep only picks worth a retry
+                    await loadPhotos(currentPage);
+                    applySelection();
+                } catch (error) {
+                    showPrintStatus('Could not reach the camera.');
+                }
+            }
+
             function viewPhoto(photoId) {
                 notifyUserActivity(); // Track photo viewing
                 const photo = photos.find(p => p.id === photoId);
@@ -3931,6 +4125,111 @@ async def delete_photos_background(all_photos):
     except Exception as e:
         delete_progress["status"] = "error"
         delete_progress["message"] = f"Error: {str(e)}"
+
+# ═══════════════════════════════════════════════════════════════════
+# Photo strips on the MX06 thermal printer, and deleting chosen photos.
+# Printing runs here, never in the camera service: a Bluetooth call that
+# hangs must not hold up the shutter.
+# ═══════════════════════════════════════════════════════════════════
+import re as _re
+
+MAX_STRIP_PHOTOS = 8
+PHOTO_ID_PATTERN = _re.compile(r"[0-9]{1,10}")
+PRINT_RUNNING = {"scanning", "sending", "finishing"}
+print_progress = {"status": "idle", "message": "", "sent": 0, "total": 0}
+
+PRINT_FAILURES = {
+    mx06.PrinterNotFound: "Printer {name} not found. Is it switched on, nearby, and not connected to the phone app?",
+    mx06.PrinterLost: "Lost the printer while printing; the strip may be incomplete.",
+    mx06.PrintTimedOut: "The printer stopped answering; the strip may be incomplete.",
+    mx06.BluetoothUnavailable: "Bluetooth is not working on the camera ({error}). See docs/software-setup.md, Photo strips.",
+    mx06.PrinterConnectFailed: "Found printer {name} but could not connect; nothing was printed. Try again.",
+}
+PRINT_SECONDS_PER_ROW = 1 / 30   # an overall limit, so a Bluetooth call that hangs cannot hold the printer for ever
+PRINT_GRACE_SECONDS = 120
+
+
+async def _photo_ids_from(request: Request, minimum: int, maximum: int) -> List[str]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be JSON")
+    ids = body.get("photo_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, str) and PHOTO_ID_PATTERN.fullmatch(i) for i in ids):
+        raise HTTPException(status_code=400, detail="photo_ids must be a list of photo numbers")
+    if not minimum <= len(ids) <= maximum:
+        raise HTTPException(status_code=400, detail=f"Choose between {minimum} and {maximum} photos")
+    return ids
+
+
+async def _run_print(image, printer_name: str):
+    def on_progress(stage, sent, total):
+        print_progress.update(status=stage, sent=sent, total=total, message={
+            "scanning": f"Looking for printer {printer_name}...",
+            "sending": "Printing...",
+            "finishing": "Finishing the strip...",
+        }[stage])
+    limit = image.height * PRINT_SECONDS_PER_ROW + PRINT_GRACE_SECONDS
+    try:
+        await asyncio.wait_for(mx06.print_image(image, name=printer_name, on_progress=on_progress), limit)
+        print_progress.update(status="done", message="Strip printed.")
+    except asyncio.TimeoutError:
+        logging.warning("Strip print stopped after %.0f s", limit)
+        print_progress.update(status="error", message="The print took too long and was stopped; the strip may be incomplete.")
+    except Exception as e:
+        template = next((t for kind, t in PRINT_FAILURES.items() if isinstance(e, kind)), "Print failed: {error}")
+        logging.warning("Strip print failed: %r", e)
+        print_progress.update(status="error", message=template.format(name=printer_name, error=e))
+
+
+@app.post("/api/print-strip/start")
+async def start_print_strip(request: Request, background_tasks: BackgroundTasks):
+    """Print the chosen photos, top to bottom in the order given, as one strip."""
+    ids = await _photo_ids_from(request, 1, MAX_STRIP_PHOTOS)
+    if print_progress.get("status") in PRINT_RUNNING:
+        raise HTTPException(status_code=409, detail="A strip is already printing")
+    paths = [os.path.join(PHOTOS_PATH, f"{photo_id}.jpg") for photo_id in ids]
+    missing = [photo_id for photo_id, path in zip(ids, paths) if not os.path.isfile(path)]
+    if missing:
+        raise HTTPException(status_code=400, detail={"message": f"Photo not found: {', '.join(missing)}", "missing": missing})
+    printer_name = settings_manager.load_settings().get("printer", {}).get("name") or "MX06"
+    previous = dict(print_progress)
+    # Claim the printer before the first await, so a second request cannot slip in.
+    print_progress.update(status="scanning", message="Making the strip...", sent=0, total=0)
+    try:
+        image = await asyncio.to_thread(photostrip.make_strip, paths)
+    except photostrip.UnreadablePhoto as e:
+        print_progress.clear(); print_progress.update(previous)
+        raise HTTPException(status_code=400, detail=f"Cannot read photo {Path(e.path).stem}")
+    except Exception:
+        print_progress.clear(); print_progress.update(previous)
+        raise
+    background_tasks.add_task(_run_print, image, printer_name)
+    return {"status": "started", "photos": len(ids)}
+
+
+@app.get("/api/print-strip/progress")
+async def get_print_progress():
+    return print_progress
+
+
+@app.post("/api/photos/delete")
+async def delete_selected_photos(request: Request):
+    """Delete the chosen photos through the camera service, one at a time."""
+    ids = list(dict.fromkeys(await _photo_ids_from(request, 1, 1000)))
+    deleted, failed = [], []
+    for photo_id in ids:
+        try:
+            result = await reframe_client.delete(f"/photos/{photo_id}")
+            if result.get("success", True):
+                deleted.append(photo_id)
+            else:
+                error = result.get("message") or result.get("error") or "not deleted"
+                failed.append({"id": photo_id, "error": error, "missing": "not found" in error.lower()})
+        except Exception as e:
+            failed.append({"id": photo_id, "error": str(e), "missing": False})
+    return {"deleted": deleted, "failed": failed}
+
 
 @app.post("/api/photos/delete-all/start")
 async def start_delete_all(background_tasks: BackgroundTasks):

@@ -610,3 +610,403 @@ def test_pisugar_server_keeps_no_network_port(before):
                           input=before, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout == ROOT_ONLY_PISUGAR_OPTS
+
+
+# ── photo strips ──────────────────────────────────────────────────────────────
+
+def photo_file(tmp_path, name, size, shade):
+    p = tmp_path / name; Image.new("RGB", size, (shade,) * 3).save(p); return str(p)
+
+
+def test_strip_of_landscape_photos_has_the_test_strips_size(tmp_path):
+    import photostrip
+    paths = [photo_file(tmp_path, f"{i}.jpg", (1200, 800), 128) for i in range(5)]
+    strip = photostrip.make_strip(paths)
+    assert strip.mode == "1" and strip.size == (384, 1266)      # the strip Zeke approved was 1266 rows
+
+
+def test_strip_keeps_a_portrait_photos_shape(tmp_path):
+    import photostrip
+    strip = photostrip.make_strip([photo_file(tmp_path, "p.jpg", (800, 1200), 128)])
+    assert strip.size == (384, 16 + 528 + 16)
+
+
+def test_strip_follows_the_order_given_and_leaves_white_borders(tmp_path):
+    import photostrip
+    dark, light = photo_file(tmp_path, "d.png", (1200, 800), 0), photo_file(tmp_path, "l.png", (1200, 800), 255)
+    strip = photostrip.make_strip([dark, light]).convert("L")
+    assert strip.getpixel((192, 16 + 117)) == 0 and strip.getpixel((192, 16 + 234 + 16 + 117)) == 255
+    assert strip.getpixel((8, 100)) == 255 and strip.getpixel((192, 16 + 234 + 8)) == 255   # margin and gap
+
+
+def test_strip_refuses_a_photo_it_cannot_read(tmp_path):
+    import photostrip
+    empty = tmp_path / "00059.jpg"; empty.write_bytes(b"")
+    with pytest.raises(photostrip.UnreadablePhoto) as e:
+        photostrip.make_strip([photo_file(tmp_path, "ok.jpg", (1200, 800), 128), str(empty)])
+    assert e.value.path == str(empty)
+
+
+# ── MX06 printer ──────────────────────────────────────────────────────────────
+
+def test_printer_command_frames_match_known_bytes():
+    import mx06
+    assert mx06.command(0xA4, b"\x32") == bytes.fromhex("5178a4000100329eff")
+    assert mx06.command(0xA1, b"\x30\x00") == bytes.fromhex("5178a10002003000f9ff")
+
+
+def test_a_row_is_run_length_encoded_and_falls_back_to_raw_bits():
+    import mx06
+    assert mx06.encode_row([1] * 8 + [0] * 376) == mx06.command(0xBF, bytes([0x88, 0x7F, 0x7F, 0x7A]))
+    assert mx06.encode_row([1, 0] * 192) == mx06.command(0xA2, bytes([0x55] * 48))    # too busy for run lengths
+
+
+def test_a_job_opens_and_closes_the_way_the_printer_expects():
+    import mx06
+    image = Image.new("1", (384, 2), 1); image.putpixel((0, 0), 0)
+    data, rows = mx06.build_job(image)
+    opening = (mx06.command(0xA3, b"\x00") + mx06.command(0xA4, b"\x32") + mx06.command(0xAF, b"\xff\xff")
+               + mx06.command(0xBE, b"\x01") + mx06.command(0xA6, bytes.fromhex("aa551738445f5f5f44382c")))
+    closing = (mx06.command(0xBD, bytes([25])) + mx06.command(0xA1, b"\x30\x00") * 3
+               + mx06.command(0xA6, bytes.fromhex("aa551700000000000000" "17")) + mx06.command(0xA3, b"\x00"))
+    assert rows == 2 and data.startswith(opening) and data.endswith(closing)
+    assert data[len(opening):-len(closing)] == mx06.encode_row([1] + [0] * 383) + mx06.encode_row([0] * 384)
+
+
+def test_a_job_refuses_an_image_of_the_wrong_width():
+    import mx06
+    with pytest.raises(ValueError): mx06.build_job(Image.new("1", (400, 2), 1))
+
+
+class FakePrinter:
+    """Stands in for a connected bleak client. `script` maps a write count to notifications fired after that write."""
+    mtu_size = 103                                   # chunks of 100
+    def __init__(self, script=None, fail_at=None): self.script, self.fail_at, self.writes, self.notify = script or {}, fail_at, [], None
+    async def start_notify(self, uuid, callback): self.notify = callback
+    async def write_gatt_char(self, uuid, data, response=False):
+        if self.fail_at is not None and len(self.writes) >= self.fail_at: raise OSError("not connected")
+        self.writes.append(bytes(data))
+        for note in self.script.get(len(self.writes), []): self.notify(uuid, bytearray(note))
+
+
+STATE = bytes.fromhex("5178a3010300000200aaff")
+
+
+def test_sender_waits_while_the_printer_says_pause():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 2: [mx06.PAUSE], 5: [STATE]})
+    async def run():
+        task = asyncio.create_task(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=1))
+        await asyncio.sleep(0.2); held = len(p.writes)
+        p.notify(None, bytearray(mx06.RESUME)); await task
+        return held
+    assert asyncio.run(run()) == 2 and len(p.writes) == 5        # nothing sent between pause and resume
+    assert b"".join(p.writes) == bytes(500)
+
+
+def test_sender_gives_up_when_the_printer_never_resumes():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 2: [mx06.PAUSE]})
+    with pytest.raises(mx06.PrintTimedOut):
+        asyncio.run(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=1, pause_timeout=0.2))
+
+
+def test_sender_finishes_at_the_second_state_reply_not_at_resume():
+    import mx06, asyncio
+    p = FakePrinter({1: [STATE], 5: [mx06.RESUME]})                # every byte sent, but no closing reply
+    with pytest.raises(mx06.PrintTimedOut): asyncio.run(mx06.send_job(p, bytes(500), rows=10, chunk_gap=0, closing_timeout=0.2))
+
+
+def test_sender_reports_a_printer_that_drops_off():
+    import mx06, asyncio
+    with pytest.raises(mx06.PrinterLost): asyncio.run(mx06.send_job(FakePrinter({1: [STATE]}, fail_at=2), bytes(500), rows=10, chunk_gap=0, closing_timeout=1))
+
+
+def test_print_image_says_when_the_printer_is_not_found_after_two_scans():
+    import mx06, asyncio
+    scans = []
+    async def nothing(name, timeout): scans.append(name); return None
+    with pytest.raises(mx06.PrinterNotFound): asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=nothing))
+    assert scans == ["MX06", "MX06"]
+
+
+def test_print_image_reports_progress_to_the_end():
+    import mx06, asyncio, contextlib
+    p = FakePrinter({1: [STATE], 2: [STATE]}); stages = []
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield p
+    asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect,
+                                 on_progress=lambda stage, sent, total: stages.append(stage)))
+    assert stages[0] == "scanning" and "sending" in stages and stages[-1] == "finishing"
+    assert b"".join(p.writes) == mx06.build_job(Image.new("1", (384, 2), 1))[0]
+
+
+def test_print_image_says_bluetooth_is_unavailable_instead_of_a_traceback():
+    import mx06, asyncio
+    async def broken(name, timeout): raise RuntimeError("org.bluez.Error.NotReady")
+    with pytest.raises(mx06.BluetoothUnavailable) as e:
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=broken))
+    assert "NotReady" in str(e.value)
+
+
+# ── dashboard: print a strip, delete chosen photos ────────────────────────────
+
+@pytest.fixture
+def strip_app(dashboard, tmp_path, monkeypatch):
+    """The dashboard with photos in a temp folder and a recording printer."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(dashboard, "PHOTOS_PATH", str(tmp_path))
+    monkeypatch.setattr(dashboard.settings_manager, "load_settings", lambda: merge_defaults({"printer": {"name": "MX99"}}))
+    monkeypatch.setattr(dashboard, "print_progress", {"status": "idle", "message": "", "sent": 0, "total": 0})
+    calls = []
+    async def fake_print(image, name="MX06", on_progress=None, **kw):
+        calls.append((image, name))
+        if on_progress: on_progress("sending", 1, 1); on_progress("finishing", 1, 1)
+    monkeypatch.setattr(dashboard.mx06, "print_image", fake_print)
+    for i, shade in ((1, 40), (2, 200), (3, 120)):
+        Image.new("RGB", (1200, 800), (shade,) * 3).save(tmp_path / f"0000{i}.jpg")
+    return types.SimpleNamespace(client=TestClient(dashboard.app), calls=calls, d=dashboard, photos=tmp_path)
+
+
+def start_print(app, ids):
+    return app.client.post("/api/print-strip/start", json={"photo_ids": ids})
+
+
+def test_print_strip_is_refused_for_no_photos_or_too_many(strip_app):
+    assert start_print(strip_app, []).status_code == 400
+    assert start_print(strip_app, ["00001"] * 9).status_code == 400
+    assert strip_app.calls == []
+
+
+def test_print_strip_is_refused_for_an_id_that_is_not_a_number(strip_app):
+    for bad in (["../settings"], ["00001.jpg"], [1], "00001"):
+        assert strip_app.client.post("/api/print-strip/start", json={"photo_ids": bad}).status_code == 400
+    assert strip_app.calls == []
+
+
+def test_print_strip_names_a_photo_that_is_missing_or_unreadable(strip_app):
+    r = start_print(strip_app, ["00001", "00009"])
+    assert r.status_code == 400 and "00009" in r.json()["detail"]["message"]
+    (strip_app.photos / "00059.jpg").write_bytes(b"")
+    r = start_print(strip_app, ["00059"])
+    assert r.status_code == 400 and "00059" in r.json()["detail"]
+    assert strip_app.calls == []
+
+
+def test_print_strip_prints_the_photos_in_the_order_given(strip_app):
+    import photostrip
+    r = start_print(strip_app, ["00002", "00001"])
+    assert r.status_code == 200
+    image, name = strip_app.calls[0]
+    want = photostrip.make_strip([str(strip_app.photos / "00002.jpg"), str(strip_app.photos / "00001.jpg")])
+    assert (image.size, image.tobytes(), name) == (want.size, want.tobytes(), "MX99")
+    assert strip_app.client.get("/api/print-strip/progress").json()["status"] == "done"
+
+
+def test_a_second_print_is_refused_while_one_runs(strip_app):
+    strip_app.d.print_progress["status"] = "sending"
+    assert start_print(strip_app, ["00001"]).status_code == 409
+
+
+@pytest.mark.parametrize("error,says", [
+    ("PrinterNotFound", "not found"),
+    ("PrinterLost", "may be incomplete"),
+    ("PrintTimedOut", "may be incomplete"),
+    ("BluetoothUnavailable", "Bluetooth"),
+])
+def test_a_failed_print_says_why_and_frees_the_printer(strip_app, monkeypatch, error, says):
+    async def failing(image, name="MX06", on_progress=None, **kw):
+        raise getattr(strip_app.d.mx06, error)("boom")
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", failing)
+    assert start_print(strip_app, ["00001"]).status_code == 200
+    progress = strip_app.client.get("/api/print-strip/progress").json()
+    assert progress["status"] == "error" and says in progress["message"]
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", lambda *a, **k: asyncio_noop())
+    assert start_print(strip_app, ["00001"]).status_code == 200
+
+
+async def asyncio_noop():
+    return None
+
+
+def fake_deleter(app, monkeypatch, gone=()):
+    deleted = []
+    async def delete(path):
+        if path.rsplit("/", 1)[-1] in gone: raise RuntimeError("404 Not Found")
+        deleted.append(path); return {"success": True}
+    monkeypatch.setattr(app.d.reframe_client, "delete", delete)
+    return deleted
+
+
+def test_delete_selected_deletes_only_the_ids_given(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch)
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00003"]})
+    assert r.status_code == 200 and deleted == ["/photos/00001", "/photos/00003"]
+    assert r.json() == {"deleted": ["00001", "00003"], "failed": []}
+
+
+def test_delete_selected_reports_a_photo_that_is_gone_and_deletes_the_rest(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch, gone={"00002"})
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00002", "00003"]}).json()
+    assert r["deleted"] == ["00001", "00003"] and [f["id"] for f in r["failed"]] == ["00002"]
+    assert deleted == ["/photos/00001", "/photos/00003"]
+
+
+def test_delete_selected_refuses_an_empty_list_and_bad_ids(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch)
+    for bad in ([], ["a/b"], ["00001", "../x"]):
+        assert strip_app.client.post("/api/photos/delete", json={"photo_ids": bad}).status_code == 400
+    assert deleted == []
+
+
+def test_printer_name_setting(dashboard):
+    assert merge_defaults({})["printer"]["name"] == "MX06"
+    for bad in ("", "x" * 33):
+        with pytest.raises(dashboard.SettingsValidationError):
+            dashboard.validate_settings(merge_defaults({"printer": {"name": bad}}))
+    dashboard.validate_settings(merge_defaults({}))
+
+
+def test_two_quick_print_requests_print_once(strip_app):
+    import asyncio, httpx
+    async def both():
+        transport = httpx.ASGITransport(app=strip_app.d.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return await asyncio.gather(*(c.post("/api/print-strip/start", json={"photo_ids": ["00001", "00002"]}) for _ in range(2)))
+    codes = sorted(r.status_code for r in asyncio.run(both()))
+    assert codes == [200, 409]
+
+
+def test_an_unreadable_photo_does_not_leave_the_printer_claimed(strip_app):
+    (strip_app.photos / "00059.jpg").write_bytes(b"")
+    assert start_print(strip_app, ["00059"]).status_code == 400
+    assert start_print(strip_app, ["00001"]).status_code == 200
+
+
+def test_dashboard_has_select_mode_controls(dashboard):
+    from fastapi.testclient import TestClient
+    html = TestClient(dashboard.app).get("/").text
+    for needle in ('id="select-btn"', 'id="select-bar"', 'id="print-strip-btn"', 'id="delete-selected-btn"',
+                   'id="select-cancel-btn"', 'id="print-status"', "/api/print-strip/start", "/api/photos/delete"):
+        assert needle in html
+
+
+def test_dashboard_script_is_valid_javascript(dashboard, tmp_path):
+    import re, shutil, subprocess
+    from fastapi.testclient import TestClient
+    if not shutil.which("node"): pytest.skip("node is not installed")
+    html = TestClient(dashboard.app).get("/").text
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts
+    for i, script in enumerate(scripts):
+        f = tmp_path / f"s{i}.js"; f.write_text(script)
+        done = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize("before,after", [
+    ("dtparam=spi=on\ndtoverlay=disable-bt\ndtoverlay=dwc2\n", "dtparam=spi=on\n#dtoverlay=disable-bt\ndtoverlay=dwc2\n"),
+    ("dtparam=spi=on\n#dtoverlay=disable-bt\n", "dtparam=spi=on\n#dtoverlay=disable-bt\n"),      # a second run changes nothing
+    ("dtparam=spi=on\n", "dtparam=spi=on\n"),
+])
+def test_printer_setup_turns_bluetooth_back_on_in_the_boot_config(before, after):
+    import subprocess
+    done = subprocess.run(["bash", "-c", "source scripts/setup-printer.sh && bluetooth_enabled_config"],
+                          input=before, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == after
+
+
+# ── final review fixes ────────────────────────────────────────────────────────
+
+def test_a_printer_found_but_not_connected_says_try_again_not_bluetooth():
+    import mx06, asyncio, contextlib
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def refuses(device):
+        raise TimeoutError()
+        yield
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=refuses))
+
+
+def test_a_failed_subscription_is_a_failed_connection():
+    import mx06, asyncio, contextlib
+    class NoNotify(FakePrinter):
+        async def start_notify(self, uuid, callback): raise RuntimeError("org.bluez.Error.InProgress")
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield NoNotify()
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect))
+
+
+def test_dashboard_says_try_again_when_the_connection_fails(strip_app, monkeypatch):
+    async def failing(image, name="MX06", on_progress=None, **kw): raise strip_app.d.mx06.PrinterConnectFailed("TimeoutError: ")
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", failing)
+    start_print(strip_app, ["00001"])
+    message = strip_app.client.get("/api/print-strip/progress").json()["message"]
+    assert "try again" in message.lower() and "nothing was printed" in message.lower() and "setup" not in message.lower()
+
+
+def test_building_the_job_does_not_freeze_the_dashboard(monkeypatch):
+    import mx06, asyncio, contextlib, time as _time
+    real = mx06.build_job
+    monkeypatch.setattr(mx06, "build_job", lambda image: (_time.sleep(0.3), real(image))[1])
+    p = FakePrinter({1: [STATE], 2: [STATE]})
+    async def found(name, timeout): return "device"
+    @contextlib.asynccontextmanager
+    async def connect(device): yield p
+    async def run():
+        ticks = 0
+        async def ticker():
+            nonlocal ticks
+            while True: await asyncio.sleep(0.02); ticks += 1
+        t = asyncio.create_task(ticker())
+        await mx06.print_image(Image.new("1", (384, 2), 1), find_device=found, connect=connect)
+        t.cancel(); return ticks
+    assert asyncio.run(run()) >= 5          # the loop kept running while the job was built
+
+
+def test_a_print_that_hangs_frees_the_printer(strip_app, monkeypatch):
+    import asyncio
+    async def hangs(image, name="MX06", on_progress=None, **kw): await asyncio.sleep(3600)
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", hangs)
+    monkeypatch.setattr(strip_app.d, "PRINT_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(strip_app.d, "PRINT_SECONDS_PER_ROW", 0)
+    start_print(strip_app, ["00001"])
+    progress = strip_app.client.get("/api/print-strip/progress").json()
+    assert progress["status"] == "error" and "may be incomplete" in progress["message"]
+
+
+def test_print_refusal_lists_the_missing_photos_for_the_page(strip_app):
+    detail = start_print(strip_app, ["00001", "00009", "00008"]).json()["detail"]
+    assert detail["missing"] == ["00009", "00008"] and "00009" in detail["message"]
+
+
+def test_delete_selected_marks_a_photo_that_is_already_gone(strip_app, monkeypatch):
+    async def delete(path):
+        return {"success": True} if path.endswith("00001") else {"success": False, "error": "Photo not found"}
+    monkeypatch.setattr(strip_app.d.reframe_client, "delete", delete)
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00002"]}).json()
+    assert r["deleted"] == ["00001"] and r["failed"] == [{"id": "00002", "error": "Photo not found", "missing": True}]
+
+
+def test_printer_setup_stops_without_touching_the_config_when_the_backup_fails(tmp_path):
+    import subprocess
+    config = tmp_path / "config.txt"; config.write_text("dtoverlay=disable-bt\n")
+    script = f'''source scripts/setup-printer.sh
+boot_config() {{ echo "{config}"; }}
+sudo() {{ if [ "$1" = cp ]; then return 1; fi; "$@"; }}
+rc=0; enable_in_boot_config || rc=$?; echo "rc=$rc"'''
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "rc=2" in done.stdout and "switched back on" not in done.stdout
+    assert config.read_text() == "dtoverlay=disable-bt\n"
+
+
+def test_a_printer_that_fails_on_the_first_write_printed_nothing():
+    import mx06, asyncio
+    # Seen on the Pi: "Service Discovery has not been performed yet" on the first write.
+    with pytest.raises(mx06.PrinterConnectFailed):
+        asyncio.run(mx06.send_job(FakePrinter(fail_at=0), bytes(500), rows=10, chunk_gap=0, closing_timeout=1))

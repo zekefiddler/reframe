@@ -120,6 +120,24 @@ The camera shows a dashboard QR code on the ePaper display whenever it connects 
 
 On Android/Pixel hotspots, `.local` hostnames may not resolve reliably. In that case, use the QR code's numeric IP URL, for example `http://192.168.x.x`.
 
+## Photo strips
+
+The dashboard can print photos as a photobooth strip on an MX06 thermal "cat printer" over Bluetooth.
+
+1. Switch the printer on, keep it within a few metres of the camera, and close its phone app: it takes one connection at a time.
+2. In the dashboard, press **select** and tap the photos you want, 1 to 8. Each shows its number; the strip prints top to bottom in that order. Picks stay while you change pages.
+3. Press **print strip**. The line above the gallery says what is happening. A five-photo strip takes about half a minute and is about 16 cm long.
+4. **delete** removes the picked photos (original and dithered copy) after one confirmation.
+
+Messages:
+- *Printer MX06 not found*: it is off, out of range, or connected to the phone. Finding it can take up to about 20 seconds before this appears.
+- *the strip may be incomplete*: the printer dropped out part-way. Print again.
+- *Bluetooth is not working on the camera*: run the setup below.
+
+The printer cannot report an empty paper roll, so a strip sent to an empty printer may say it printed. The printer's name is the `printer.name` setting (default `MX06`).
+
+**Setup on a camera installed before photo strips existed:** update the software (`sudo /usr/local/sbin/reframe-apply-update`, which installs `bleak`), then run `bash scripts/setup-printer.sh`. If it says so, reboot and run it once more. New installs do this automatically.
+
 ## HDR (Camera Module 3)
 
 HDR is automatically enabled at startup via `scripts/enable_hdr.sh` after Python imports finish but before Picamera2 opens the camera. This overlaps camera-device discovery with Python startup. To control it manually:
@@ -255,7 +273,6 @@ The installer optimizes for fastest boot-to-first-photo while keeping WiFi, SSH,
 It writes these headless hardware settings to the Pi boot config.
 
 ```bash
-dtoverlay=disable-bt
 dtparam=audio=off
 hdmi_blanking=2
 boot_delay=0
@@ -276,7 +293,7 @@ sudo systemctl disable --now \
   udisks2.service rsync.service rpi-eeprom-update.service \
   networking.service keyboard-setup.service console-setup.service \
   rsyslog.service \
-  bluetooth.service hciuart.service bluealsa.service \
+  bluealsa.service \
   apt-daily.timer apt-daily-upgrade.timer man-db.timer \
   e2scrub_all.timer fstrim.timer
 ```
@@ -284,6 +301,7 @@ sudo systemctl disable --now \
 Do **not** disable these for the normal camera build:
 
 ```bash
+bluetooth.service   # printing photo strips
 ssh.service
 wpa_supplicant.service
 dhcpcd.service
@@ -298,8 +316,10 @@ On the reference Pi Zero 2 W, these changes plus the in-memory capture path redu
 To undo the service trims, re-enable only what you need, for example:
 
 ```bash
-sudo systemctl enable --now bluetooth.service hciuart.service
+sudo systemctl enable --now bluealsa.service
 ```
+
+Earlier versions of the installer also switched Bluetooth off. `scripts/setup-printer.sh` undoes that; see [Photo strips](#photo-strips).
 
 ---
 

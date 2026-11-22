@@ -5,4 +5,5 @@ fastapi
 uvicorn
 aiofiles
 httpx
+bleak==3.1.0  # printed on the Pi; mx06.py uses its private _acquire_mtu
 qrcode==7.4.2

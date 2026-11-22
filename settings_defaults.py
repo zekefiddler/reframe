@@ -37,6 +37,9 @@ DEFAULT_SETTINGS = {
     "exports": {
         "upscale_dithered_2x": False
     },
+    "printer": {
+        "name": "MX06"
+    },
     "extensions": {
         "arena": {
             "enabled": False,
