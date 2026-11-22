@@ -610,3 +610,38 @@ def test_pisugar_server_keeps_no_network_port(before):
                           input=before, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout == ROOT_ONLY_PISUGAR_OPTS
+
+
+# ── photo strips ──────────────────────────────────────────────────────────────
+
+def photo_file(tmp_path, name, size, shade):
+    p = tmp_path / name; Image.new("RGB", size, (shade,) * 3).save(p); return str(p)
+
+
+def test_strip_of_landscape_photos_has_the_test_strips_size(tmp_path):
+    import photostrip
+    paths = [photo_file(tmp_path, f"{i}.jpg", (1200, 800), 128) for i in range(5)]
+    strip = photostrip.make_strip(paths)
+    assert strip.mode == "1" and strip.size == (384, 1266)      # the strip Zeke approved was 1266 rows
+
+
+def test_strip_keeps_a_portrait_photos_shape(tmp_path):
+    import photostrip
+    strip = photostrip.make_strip([photo_file(tmp_path, "p.jpg", (800, 1200), 128)])
+    assert strip.size == (384, 16 + 528 + 16)
+
+
+def test_strip_follows_the_order_given_and_leaves_white_borders(tmp_path):
+    import photostrip
+    dark, light = photo_file(tmp_path, "d.png", (1200, 800), 0), photo_file(tmp_path, "l.png", (1200, 800), 255)
+    strip = photostrip.make_strip([dark, light]).convert("L")
+    assert strip.getpixel((192, 16 + 117)) == 0 and strip.getpixel((192, 16 + 234 + 16 + 117)) == 255
+    assert strip.getpixel((8, 100)) == 255 and strip.getpixel((192, 16 + 234 + 8)) == 255   # margin and gap
+
+
+def test_strip_refuses_a_photo_it_cannot_read(tmp_path):
+    import photostrip
+    empty = tmp_path / "00059.jpg"; empty.write_bytes(b"")
+    with pytest.raises(photostrip.UnreadablePhoto) as e:
+        photostrip.make_strip([photo_file(tmp_path, "ok.jpg", (1200, 800), 128), str(empty)])
+    assert e.value.path == str(empty)
