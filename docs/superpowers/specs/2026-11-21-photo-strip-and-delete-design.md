@@ -151,6 +151,11 @@ for BlueZ.
 - The photos on the strip are chosen, not "the last five".
 - Photos can be deleted from the dashboard.
 - The number of photos on a strip can vary.
+- **Strips are made from each photo's original JPEG,** not the six-colour
+  dithered copy. On 2026-11-22 he compared three versions of two photos on
+  paper (from the original; from the six-colour copy with the same steps; from
+  the six-colour copy with its dots kept) and judged the original the best
+  looking.
 
 **Claude's calls (not confirmed one by one; Zeke saw the list and objected to
 none)**
@@ -168,8 +173,6 @@ none)**
 - Sending stops while the printer says "pause" and the job is finished only at
   the second `a3` reply, with a time limit that grows with the strip's length.
   On a time-out the page says the strip may be incomplete.
-- The source for a strip is each photo's original JPEG, not the six-colour
-  dithered copy.
 - **Bluetooth setup:** a script, `scripts/setup-printer.sh`, removes
   `dtoverlay=disable-bt` and enables `bluetooth.service`, in the style of
   `scripts/setup-pisugar.sh` (functions behind a main guard, refuses to run off
