@@ -645,3 +645,34 @@ def test_strip_refuses_a_photo_it_cannot_read(tmp_path):
     with pytest.raises(photostrip.UnreadablePhoto) as e:
         photostrip.make_strip([photo_file(tmp_path, "ok.jpg", (1200, 800), 128), str(empty)])
     assert e.value.path == str(empty)
+
+
+# ── MX06 printer ──────────────────────────────────────────────────────────────
+
+def test_printer_command_frames_match_known_bytes():
+    import mx06
+    assert mx06.command(0xA4, b"\x32") == bytes.fromhex("5178a4000100329eff")
+    assert mx06.command(0xA1, b"\x30\x00") == bytes.fromhex("5178a10002003000f9ff")
+
+
+def test_a_row_is_run_length_encoded_and_falls_back_to_raw_bits():
+    import mx06
+    assert mx06.encode_row([1] * 8 + [0] * 376) == mx06.command(0xBF, bytes([0x88, 0x7F, 0x7F, 0x7A]))
+    assert mx06.encode_row([1, 0] * 192) == mx06.command(0xA2, bytes([0x55] * 48))    # too busy for run lengths
+
+
+def test_a_job_opens_and_closes_the_way_the_printer_expects():
+    import mx06
+    image = Image.new("1", (384, 2), 1); image.putpixel((0, 0), 0)
+    data, rows = mx06.build_job(image)
+    opening = (mx06.command(0xA3, b"\x00") + mx06.command(0xA4, b"\x32") + mx06.command(0xAF, b"\xff\xff")
+               + mx06.command(0xBE, b"\x01") + mx06.command(0xA6, bytes.fromhex("aa551738445f5f5f44382c")))
+    closing = (mx06.command(0xBD, bytes([25])) + mx06.command(0xA1, b"\x30\x00") * 3
+               + mx06.command(0xA6, bytes.fromhex("aa551700000000000000" "17")) + mx06.command(0xA3, b"\x00"))
+    assert rows == 2 and data.startswith(opening) and data.endswith(closing)
+    assert data[len(opening):-len(closing)] == mx06.encode_row([1] + [0] * 383) + mx06.encode_row([0] * 384)
+
+
+def test_a_job_refuses_an_image_of_the_wrong_width():
+    import mx06
+    with pytest.raises(ValueError): mx06.build_job(Image.new("1", (400, 2), 1))
