@@ -98,6 +98,7 @@ PISUGAR_STATUS_REGISTER = 0x02   # bit 0 is set while the power button is held
 LONG_PRESS_SECONDS = 2.0         # a hold this long is the PiSugar's power-off, not a photo
 BUTTON_ERROR_LOG_SECONDS = 60
 REFRESH_RETRY_SECONDS = 60  # after a failed refresh, the ticker waits this long before retrying
+CAPTURE_TIMEOUT_SECONDS = 10  # a photo normally arrives in well under a second
 
 os.makedirs(RUNTIME_PATH, exist_ok=True)
 _log_handlers = [logging.StreamHandler()]
@@ -145,6 +146,35 @@ def update_diagnostics(component=None, issue=None, activity=None):
 def get_diagnostics():
     with _diagnostics_lock:
         return json.loads(json.dumps(_diagnostics))
+
+
+class CameraStalled(RuntimeError):
+    """The camera accepted a capture and sent no picture."""
+
+
+def kernel_camera_messages():
+    """The kernel's last lines about the camera. They say why it stalled, and a reboot loses them."""
+    try:
+        lines = subprocess.run(["dmesg"], capture_output=True, text=True, timeout=5).stdout.splitlines()
+        return [line for line in lines if any(word in line for word in ("imx", "unicam", "csi", "i2c"))][-8:]
+    except Exception as e:
+        return [f"(could not read the kernel log: {e})"]
+
+
+def restart_service():
+    """End this process in a moment, so systemd (Restart=always) starts a fresh one.
+
+    For a fault only a new process clears, such as a camera that has stopped
+    delivering frames. The short delay lets the caller answer the press or the
+    dashboard request first.
+    """
+    logging.error("Restarting the camera service")
+
+    def leave():
+        logging.shutdown()  # flush the log file first: os._exit skips every cleanup
+        os._exit(1)
+
+    threading.Timer(1.0, leave).start()
 
 
 def record_service_failure(error):
@@ -492,6 +522,23 @@ class CameraManager:
                 "file_size": None,
                 "message": "Photo captured successfully"
             }, image
+        except CameraStalled as e:
+            # Seen when the sensor stops answering on its I2C bus (the kernel logs
+            # "imx708 ... Failed to write reg"). Only reopening the camera clears it.
+            logging.error(f"Error capturing photo: {e}")
+            for line in kernel_camera_messages():
+                logging.error("kernel: %s", line)
+            update_diagnostics(
+                "camera",
+                "Camera stopped sending pictures. Check that the ribbon cable is fully seated at both ends.",
+                "Camera stopped sending pictures; restarting the camera service",
+            )
+            restart_service()
+            return {
+                "success": False,
+                "error": "camera_stalled",
+                "message": "The camera stopped sending pictures. The camera service is restarting; try again in half a minute."
+            }, None
         except Exception as e:
             logging.error(f"Error capturing photo: {e}")
             update_diagnostics("camera", "Camera capture failed", "Photo capture failed")
@@ -595,9 +642,18 @@ class CameraManager:
         logging.info(f"Photo saved to {file_path}")
 
     def capture_image(self, fast_mode=False):
-        """Capture a photo into memory as a PIL image."""
+        """Capture a photo into memory as a PIL image.
+
+        Raises CameraStalled when no picture arrives. Waiting without a limit
+        would hold the operation lock for ever, and the button and the
+        dashboard shutter with it.
+        """
         self._settle_autofocus(fast_mode)
-        image = self.picam2.capture_image("main")
+        job = self.picam2.capture_image("main", wait=False)
+        try:
+            image = self.picam2.wait(job, timeout=CAPTURE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            raise CameraStalled(f"no picture from the camera within {CAPTURE_TIMEOUT_SECONDS} s") from None
         logging.info("Photo captured to memory")
         return image
 

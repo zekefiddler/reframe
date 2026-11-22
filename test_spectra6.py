@@ -372,6 +372,32 @@ def test_rotate_180_sets_camera_transform(monkeypatch, flip):
     assert (transform.flips == (1, 1)) if flip else transform is None
 
 
+class StalledPicam(FakePicam):
+    """A camera that has stopped delivering frames: the capture job never finishes."""
+    def capture_image(self, name="main", wait=None, signal_function=None):
+        self.asked = (name, wait); return "job"
+    def wait(self, job, timeout=None):
+        self.waited = (job, timeout)
+        if timeout is None: raise AssertionError("waited for a frame with no time limit: the camera would hang")
+        raise TimeoutError()                           # what picamera2's Job.get_result raises
+
+
+def test_a_camera_that_stops_delivering_frames_fails_the_photo_and_restarts(tmp_path, monkeypatch):
+    # 2026-11-21: the sensor stopped answering, capture_image() waited for ever holding the
+    # operation lock, and the button and the dashboard shutter were dead until a power cycle.
+    monkeypatch.setattr(reframe, "DIAGNOSTICS_PATH", str(tmp_path / "diagnostics.json"))
+    restarts = []
+    monkeypatch.setattr(reframe, "restart_service", lambda: restarts.append("restart"))
+    cm = object.__new__(reframe.CameraManager)
+    cm.settings = merge_defaults({}); cm.picam2 = StalledPicam(); cm._has_captured = True
+    cm.last_activity_time = 0
+    result, image = cm.capture_image_with_metadata(str(tmp_path / "00001.jpg"))
+    assert (result["success"], image) == (False, None)                  # the press ends
+    assert cm.picam2.asked == ("main", False) and cm.picam2.waited[1] <= 30
+    assert restarts == ["restart"]                                      # a fresh process reopens the camera
+    assert "ribbon cable" in reframe.get_diagnostics()["issues"]["camera"]
+
+
 def test_dashboard_has_spectra6_controls(dashboard):
     from fastapi.testclient import TestClient
     html = TestClient(dashboard.app).get("/").text
