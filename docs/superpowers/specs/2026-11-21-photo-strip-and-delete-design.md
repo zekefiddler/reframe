@@ -233,6 +233,22 @@ On the device, with Zeke:
   photo on the panel moves the panel to the newest remaining one.
 - Boot time with Bluetooth on.
 
+## Found on the Pi (Task 1, 2026-11-22)
+
+- Prints work from the Pi: a one-photo strip (9 s) and a five-photo strip came
+  out whole. bleak in a venv, BlueZ 5.82, no group membership needed.
+- **The MTU fix is required:** BlueZ reported 23 until `_acquire_mtu()`, then
+  248 (chunks of 245 bytes).
+- **The Bluetooth radio was rfkill soft-blocked** after re-enabling the service
+  (`bluetoothctl show`: `PowerState: off-blocked`). Writing `0` to
+  `/sys/class/rfkill/<bluetooth>/soft` fixed it. The setup script must do this.
+- **Scans miss:** two of five 10 s name scans did not find the printer, which
+  was advertising nearby. Ruling (Claude): scan twice, so "not found" takes up
+  to about 20 s.
+- On the Pi the printer's pause signals arrived after every byte had left the
+  script (BlueZ queues writes), and nothing was lost. The pause handling stays.
+- Boot time with Bluetooth on: 63.1 s, unchanged.
+
 ## Open
 
 - **Printing from the Pi is unproven.** Step 1 exists to settle it.
