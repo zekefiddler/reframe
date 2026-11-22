@@ -146,8 +146,15 @@ main() {
     if ! server_installed || ! poweroff_enabled; then
         install_server
     fi
-    if ! server_installed || [ ! -f "$SERVER_DEFAULTS" ]; then
+    if ! server_installed; then
         warn "pisugar-server is not installed: the button still takes photos, but a long press cuts power without a clean shutdown."
+        exit 1
+    fi
+    if [ ! -f "$SERVER_DEFAULTS" ]; then
+        # Without its options file the server cannot be limited to root, and the
+        # package's own defaults listen on the network. Do not leave it running.
+        sudo systemctl disable --now pisugar-server || true
+        warn "$SERVER_DEFAULTS is missing, so pisugar-server could not be limited to root; it was stopped and disabled."
         exit 1
     fi
 
