@@ -181,7 +181,8 @@ of the build table, goals 1 and 6, and the first three of "Claude's calls".
 **Claude's calls (not confirmed by Zeke)**
 - **Shutter = the PiSugar power button over I2C** (0x57, register 0x02, bit 0), as
   upstream. A press shorter than 2 s takes a photo; a longer one is left to the
-  PiSugar.
+  PiSugar. A poll that could not be read is ignored, so one I2C error during a
+  hold cannot take a photo while the camera is powering off.
 - **A missing bus or a silent PiSugar must not stop the camera.** The button reads
   as "not pressed", diagnostics say so, and the dashboard shutter keeps working.
   Upstream opens the bus at startup and dies without it.
@@ -191,7 +192,10 @@ of the build table, goals 1 and 6, and the first three of "Claude's calls".
   network profiles again (see "Anti-goals").
 - **PiSugar settings:** one press powers on (`anti_mistouch` off); a long press
   runs a clean shutdown (`soft_poweroff` on); `pisugar-poweroff` then cuts the
-  battery. **Cost:** with `soft_poweroff` on, a hung Pi cannot be turned off from
+  battery. The script turns `soft_poweroff` on only when the model is a PiSugar 3
+  and `pisugar-poweroff` is enabled: without that last step the Pi would halt with
+  the battery still on, and the button could neither start nor stop it.
+  **Cost:** with `soft_poweroff` on, a hung Pi cannot be turned off from
   the button; it runs until the battery is empty or the PiSugar's reset button is
   pressed inside the case.
 - **Only root can reach pisugar-server.** It runs as root and runs shell commands

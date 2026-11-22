@@ -306,6 +306,9 @@ def test_shutter_press_shows_a_new_photo(system):
     ([(0.0, True), (2.5, False)], [False, False]),                      # a hold is the PiSugar's power-off
     ([(0.0, True), (2.0, False)], [False, False]),                      # ...from exactly two seconds
     ([(0.0, False), (0.1, False)], [False, False]),                     # idle
+    ([(0.0, True), (0.5, None), (3.0, False)], [False, False, False]),  # a failed read mid-hold is not a release
+    ([(0.0, True), (0.1, None), (0.2, False)], [False, False, True]),   # ...and does not lose a real tap
+    ([(0.0, None), (0.1, None)], [False, False]),                       # no PiSugar at all: never a tap
 ])
 def test_tap_is_a_short_press_seen_at_release(polls, want):
     state = {}
@@ -339,9 +342,10 @@ def test_power_button_without_i2c_is_not_pressed_and_recovers(tmp_path, monkeypa
         if isinstance(bus, Exception): raise bus
         return bus
     button = reframe.PowerButton(open_bus)
-    assert button.pressed() is False                          # I2C is off: no crash, no press
-    assert "PiSugar" in reframe.get_diagnostics()["issues"]["button"]
-    assert button.pressed() is False                          # bus opens, the PiSugar does not answer
+    assert button.pressed() is None                           # I2C is off: no crash, and no answer
+    issue = reframe.get_diagnostics()["issues"]["button"]
+    assert "PiSugar" in issue and "/dev/i2c-1" in issue       # says what to check, and what failed
+    assert button.pressed() is None                           # bus opens, the PiSugar does not answer
     assert button.pressed() is True                           # answers: works without a restart
     assert "button" not in reframe.get_diagnostics()["issues"]
 
@@ -508,13 +512,25 @@ def test_automatic_refresh_backs_off_when_every_photo_is_unreadable(system, monk
     assert system.next_photo()["error"] == "unreadable"                   # a manual press still tries
 
 
+def test_a_dead_button_is_logged_once_a_minute_not_every_poll(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(reframe, "DIAGNOSTICS_PATH", str(tmp_path / "diagnostics.json"))
+    clock = [1000.0]
+    monkeypatch.setattr(reframe.time, "monotonic", lambda: clock[0])
+    def no_bus(): raise FileNotFoundError("/dev/i2c-1")
+    button = reframe.PowerButton(no_bus)
+    def errors_after(seconds):
+        clock[0] += seconds; button.pressed()
+        return sum(r.levelname == "ERROR" for r in caplog.records)
+    assert [errors_after(0), errors_after(0.025), errors_after(59), errors_after(1)] == [1, 1, 1, 2]
+
+
 def test_only_passwordless_command_is_shutdown():
     # Owner's rulings: the inactivity shutdown may power off without a password, and nothing
     # else may. Above all not the update helper, which installs files the login user can write.
-    rules = [line.strip() for path in ("install.sh", "scripts/setup-pisugar.sh", "scripts/reframe-apply-update")
+    import glob
+    rules = [line.strip() for path in ["install.sh", *sorted(glob.glob("scripts/*"))]
              for line in open(path) if "NOPASSWD" in line and not line.lstrip().startswith("#")]
-    assert len(rules) == 1
-    assert rules[0].endswith('ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now" > "$rule"')
+    assert rules == ['echo "$CURRENT_USER ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now" > "$rule"']
 
 
 def test_update_without_sudo_rule_says_how_to_finish(dashboard, monkeypatch, tmp_path):

@@ -42,6 +42,9 @@ pisugar() { echo "$1" | sudo nc -U -w 2 -q 0 "$SOCKET" 2>/dev/null || true; }
 
 server_installed() { systemctl cat pisugar-server.service > /dev/null 2>&1; }
 
+# pisugar-poweroff is what cuts the battery once the Pi has shut down.
+poweroff_enabled() { systemctl is-enabled --quiet pisugar-poweroff.service 2> /dev/null; }
+
 setting() {
     if [[ "$(pisugar "$1")" == *done* ]]; then
         say "$2"
@@ -65,13 +68,22 @@ allow_shutdown() {
     rm -f "$rule"
 }
 
+# Never stops the script: PiSugar's installer starts pisugar-server with its
+# ports open to the network, so whatever happens here, the lock-down below
+# still has to run.
 install_server() {
-    local installer
+    local installer status=0
     say "Installing PiSugar Power Manager"
     installer="$(mktemp)"
-    wget -q -O "$installer" https://cdn.pisugar.com/release/pisugar-power-manager.sh
-    bash "$installer" -c release --model 'PiSugar 3' --non-interactive
+    if wget -q -O "$installer" https://cdn.pisugar.com/release/pisugar-power-manager.sh; then
+        bash "$installer" -c release --model 'PiSugar 3' --non-interactive || status=$?
+    else
+        status=$?
+    fi
     rm -f "$installer"
+    if [ "$status" -ne 0 ]; then
+        warn "PiSugar's installer did not finish (exit $status). Run this script again when the network is back."
+    fi
 }
 
 # True when nothing but root can send pisugar-server a command.
@@ -131,15 +143,19 @@ main() {
 
     # PiSugar Power Manager: clean long-press shutdown, low-battery shutdown,
     # and cutting the battery once the Pi has shut down.
-    server_installed || install_server
+    if ! server_installed || ! poweroff_enabled; then
+        install_server
+    fi
     if ! server_installed || [ ! -f "$SERVER_DEFAULTS" ]; then
         warn "pisugar-server is not installed: the button still takes photos, but a long press cuts power without a clean shutdown."
-        exit 0
+        exit 1
     fi
 
     if lock_down_server; then
         say "pisugar-server takes commands from root only, and has no network port"
     else
+        # Leave the long press as a plain power cut, then take the server away.
+        pisugar "set_soft_poweroff false" > /dev/null
         sudo systemctl disable --now pisugar-server || true
         warn "pisugar-server could not be limited to root, so it was stopped and disabled. Until that is fixed there is no clean long-press shutdown. Check: systemctl status pisugar-server"
         exit 1
@@ -150,12 +166,24 @@ main() {
         exit 0
     fi
 
-    if [[ "$(pisugar "get model")" == *model* ]]; then
-        setting "set_anti_mistouch false" "One press powers the camera on"
+    local model
+    model="$(pisugar "get model")"
+    if [[ "$model" != *model* ]]; then
+        warn "pisugar-server is not answering, so the PiSugar settings were not changed. Check: systemctl status pisugar-server"
+        exit 1
+    fi
+    setting "set_anti_mistouch false" "One press powers the camera on"
+
+    # With the clean shutdown on, a long press no longer cuts power itself: the
+    # Pi shuts down and pisugar-poweroff tells the PiSugar to cut the battery.
+    # Without that last step the camera would sit halted, unable to be turned
+    # off or on from the button, so the setting is only made when it is there.
+    if [[ "$model" == *"PiSugar 3"* ]] && poweroff_enabled; then
         setting "set_soft_poweroff_shell shutdown --poweroff 0" "A long press runs a clean shutdown"
         setting "set_soft_poweroff true" "A long press no longer cuts power outright"
     else
-        warn "pisugar-server is not answering, so the PiSugar settings were not changed. Check: systemctl status pisugar-server"
+        setting "set_soft_poweroff false" "A long press cuts power outright (no clean shutdown)"
+        warn "the clean long-press shutdown was left off: it needs a PiSugar 3 and the pisugar-poweroff service, and found \"$model\" with pisugar-poweroff $(poweroff_enabled && echo enabled || echo "not enabled")."
     fi
 }
 

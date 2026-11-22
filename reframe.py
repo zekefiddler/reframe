@@ -1891,9 +1891,10 @@ def open_pisugar_bus():
 class PowerButton:
     """The PiSugar 3 power button, read over I2C.
 
-    A missing bus or a silent PiSugar reads as "not pressed", so the camera
-    keeps working from the dashboard; the fault shows in diagnostics and clears
-    by itself once the PiSugar answers.
+    pressed() is True or False, or None when the PiSugar could not be read. A
+    missing bus or a silent PiSugar is never a press, so the camera keeps
+    working from the dashboard; the fault shows in diagnostics and clears by
+    itself once the PiSugar answers.
     """
 
     def __init__(self, open_bus=open_pisugar_bus):
@@ -1912,14 +1913,14 @@ class PowerButton:
             if self.healthy is not False:
                 update_diagnostics(
                     "button",
-                    "Shutter button is not responding. Check the PiSugar connection and I2C.",
+                    f"Shutter button is not responding ({e}). Check the PiSugar connection and I2C.",
                     "Shutter button stopped responding",
                 )
             if self.healthy is not False or now - self.last_error_log >= BUTTON_ERROR_LOG_SECONDS:
                 logging.error("Failed to read the shutter button over I2C: %s", e)
                 self.last_error_log = now
             self.healthy = False
-            return False
+            return None
         if self.healthy is False:
             logging.info("Shutter button I2C connection recovered")
             update_diagnostics("button", activity="Shutter button connection recovered")
@@ -1932,7 +1933,14 @@ class PowerButton:
 
 
 def tap_released(state, pressed, now):
-    """Feed one poll of the button; True when a short press has just been released."""
+    """Feed one poll of the button; True when a short press has just been released.
+
+    A poll that could not be read (None) is no information: it neither ends a
+    hold nor starts one. Counting it as a release would take a photo in the
+    middle of a long press, while the PiSugar is powering the camera off.
+    """
+    if pressed is None:
+        return False
     since = state.get("since")
     if pressed:
         if since is None:

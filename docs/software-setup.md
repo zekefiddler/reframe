@@ -47,7 +47,7 @@ The camera's one button is the PiSugar 3 power button, wired out to the case as 
 
 The installer runs `scripts/setup-pisugar.sh`, which turns on I2C, installs PiSugar's power manager, and adds one sudo rule that lets the camera's user run `shutdown -h now` for the inactivity timeout. If I2C was off, the script asks for a reboot and a second run.
 
-PiSugar's power manager runs as root and runs shell commands it is sent, with no login on any of its ports or on its socket. The script therefore removes its network ports (so there is no PiSugar web page or phone app) and moves its socket into a root-only directory. The dashboard reads the battery level straight from the PiSugar over I2C. On a camera that is already installed, run only that script: `bash scripts/setup-pisugar.sh`.
+PiSugar's power manager runs as root and runs shell commands it is sent, with no login on any of its ports or on its socket. The script therefore removes its network ports (so there is no PiSugar web page or phone app) and moves its socket into a root-only directory. The dashboard reads the battery level straight from the PiSugar over I2C. On a camera that is already installed, update the software first (`sudo /usr/local/sbin/reframe-apply-update`, which installs the `smbus2` module the button needs), then run only that script: `bash scripts/setup-pisugar.sh`. A camera that was installed earlier also keeps its saved settings, so check the QR code and inactivity shutdown switches under system settings in the dashboard.
 
 ## 4. Reboot
 
@@ -146,7 +146,7 @@ reFrame captures each shutter-button photo into memory first so the image can be
 - The display/dashboard dithered version is saved as a PNG so the 6-color dithered image stays crisp.
 - Immediately after a capture, the dashboard may take a moment to show the newest files while the background save finishes.
 
-Auto-shutdown after inactivity is on by default, so a camera left on does not run its battery flat. Turn it off with `system.auto_timeout_enabled` in `settings.json` (or the dashboard) and set the delay with `system.auto_timeout_minutes` (10 minutes by default). It runs `sudo shutdown -h now`, which the sudo rule from `scripts/setup-pisugar.sh` allows without a password.
+Auto-shutdown after inactivity is on by default, so a camera left on does not run its battery flat. Only photos and dashboard use count as activity: a slideshow or an SSH session does not keep the camera on. Turn it off with `system.auto_timeout_enabled` in `settings.json` (or the dashboard) and set the delay with `system.auto_timeout_minutes` (10 minutes by default). It runs `sudo shutdown -h now`, which the sudo rule from `scripts/setup-pisugar.sh` allows without a password.
 
 ## Other Displays Or Cameras
 

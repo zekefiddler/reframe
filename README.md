@@ -59,12 +59,12 @@ chmod +x install.sh
 
 reFrame is extremely minimalist by design. It has one button, which is both power and shutter; no viewfinder, flash or zoom.
 
-1. Press the button to turn the camera on. Once it has booted and joined WiFi, the screen shows the dashboard QR code.
+1. Press the button to turn the camera on. Once it has booted and joined WiFi, the screen shows the dashboard QR code (a setting, on by default).
 2. Press the button to take a photo. With no photos yet, the screen says so.
 3. The original image is saved, then dithered to a 6-color palette to match the screen. The processed image is sent to the ePaper display.
 4. The ePaper screen takes about 20–35 seconds to display the photo. Presses during a refresh are ignored.
 5. Step back through older photos from the dashboard, or let the slideshow setting do it automatically.
-6. Hold the button for two seconds to turn the camera off. It also turns itself off after 10 minutes of inactivity. The last photo stays on the screen.
+6. Hold the button for two seconds to turn the camera off. By default it also turns itself off after 10 minutes without a photo or a dashboard visit. The last photo stays on the screen.
 
 A web dashboard, accessible over the local network, lets you browse photos, download originals, change the displayed image, adjust camera settings, and optionally upload dithered photos to Are.na.
 

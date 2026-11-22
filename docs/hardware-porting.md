@@ -32,7 +32,7 @@ The default button path reads the PiSugar 3 power button over I2C (`PowerButton`
 
 - Replace `PowerButton.pressed()` so it returns whether your button is held.
 - Keep the short-press behavior calling `handle_button_press()`, which takes the photo.
-- Skip `scripts/setup-pisugar.sh` in `install.sh`; it is specific to the PiSugar.
+- Skip `scripts/setup-pisugar.sh` in `install.sh`; it is specific to the PiSugar. It also installs the sudo rule that lets the inactivity timeout run `shutdown -h now`, so add that rule yourself or turn the timeout off.
 - Keep long-press shutdown behavior in the power manager if your hardware has one; otherwise implement it explicitly.
 
 ## Dashboard
