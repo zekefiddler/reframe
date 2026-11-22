@@ -903,3 +903,16 @@ def test_dashboard_script_is_valid_javascript(dashboard, tmp_path):
         f = tmp_path / f"s{i}.js"; f.write_text(script)
         done = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize("before,after", [
+    ("dtparam=spi=on\ndtoverlay=disable-bt\ndtoverlay=dwc2\n", "dtparam=spi=on\n#dtoverlay=disable-bt\ndtoverlay=dwc2\n"),
+    ("dtparam=spi=on\n#dtoverlay=disable-bt\n", "dtparam=spi=on\n#dtoverlay=disable-bt\n"),      # a second run changes nothing
+    ("dtparam=spi=on\n", "dtparam=spi=on\n"),
+])
+def test_printer_setup_turns_bluetooth_back_on_in_the_boot_config(before, after):
+    import subprocess
+    done = subprocess.run(["bash", "-c", "source scripts/setup-printer.sh && bluetooth_enabled_config"],
+                          input=before, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == after

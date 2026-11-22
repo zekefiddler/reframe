@@ -77,6 +77,11 @@ fi
 bash "$SCRIPT_DIR/scripts/setup-pisugar.sh" \
     || warn "PiSugar setup did not finish. Run it again later: bash $SCRIPT_DIR/scripts/setup-pisugar.sh"
 
+# Bluetooth for printing photo strips. Printing is optional, so a failure here
+# is not fatal either.
+bash "$SCRIPT_DIR/scripts/setup-printer.sh" \
+    || warn "Printer setup did not finish. Run it again later: bash $SCRIPT_DIR/scripts/setup-printer.sh"
+
 # ── 3. Boot-speed hardware trims ────────────
 step "Applying boot-speed hardware trims"
 
@@ -97,7 +102,6 @@ ensure_exact_boot_config_line() {
     fi
 }
 
-ensure_exact_boot_config_line "dtoverlay=disable-bt"
 ensure_boot_config_line "dtparam=audio" "dtparam=audio=off"
 ensure_boot_config_line "hdmi_blanking" "hdmi_blanking=2"
 ensure_boot_config_line "boot_delay" "boot_delay=0"
@@ -118,7 +122,7 @@ if ! grep -qw "loglevel=3" "$BOOT_CMDLINE"; then
     sudo sed -i '1 s/$/ loglevel=3/' "$BOOT_CMDLINE"
 fi
 
-info "Applied headless Bluetooth, audio, display-probe, console, and boot-delay trims"
+info "Applied headless audio, display-probe, console, and boot-delay trims (Bluetooth stays on for the printer)"
 
 # ── 4. User permissions ─────────────────────
 step "Setting up user permissions"
@@ -181,8 +185,6 @@ sudo systemctl disable --now \
     udisks2.service \
     rsync.service \
     rpi-eeprom-update.service \
-    bluetooth.service \
-    hciuart.service \
     bluealsa.service \
     networking.service \
     keyboard-setup.service \
@@ -195,7 +197,7 @@ sudo systemctl disable --now \
     fstrim.timer \
     2>/dev/null || true
 
-info "Disabled unused desktop/modem/Bluetooth/update timer services when present"
+info "Disabled unused desktop/modem/update timer services when present"
 
 # ── Done ────────────────────────────────────
 echo ""
@@ -208,6 +210,7 @@ echo "    1. Reboot:  sudo reboot"
 echo "    2. reFrame will start automatically on boot"
 echo "    3. Finish the PiSugar setup (it needs I2C, which starts at the reboot):"
 echo "         bash $SCRIPT_DIR/scripts/setup-pisugar.sh"
+echo "       and the printer setup:  bash $SCRIPT_DIR/scripts/setup-printer.sh"
 echo "    4. Dashboard: http://$(hostname).local"
 echo "       Fallback:  http://$(hostname).local:8000"
 echo ""
