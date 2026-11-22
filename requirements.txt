@@ -5,4 +5,5 @@ fastapi
 uvicorn
 aiofiles
 httpx
+bleak
 qrcode==7.4.2

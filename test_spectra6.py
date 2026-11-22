@@ -748,3 +748,137 @@ def test_print_image_says_bluetooth_is_unavailable_instead_of_a_traceback():
     with pytest.raises(mx06.BluetoothUnavailable) as e:
         asyncio.run(mx06.print_image(Image.new("1", (384, 2), 1), find_device=broken))
     assert "NotReady" in str(e.value)
+
+
+# ── dashboard: print a strip, delete chosen photos ────────────────────────────
+
+@pytest.fixture
+def strip_app(dashboard, tmp_path, monkeypatch):
+    """The dashboard with photos in a temp folder and a recording printer."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(dashboard, "PHOTOS_PATH", str(tmp_path))
+    monkeypatch.setattr(dashboard.settings_manager, "load_settings", lambda: merge_defaults({"printer": {"name": "MX99"}}))
+    monkeypatch.setattr(dashboard, "print_progress", {"status": "idle", "message": "", "sent": 0, "total": 0})
+    calls = []
+    async def fake_print(image, name="MX06", on_progress=None, **kw):
+        calls.append((image, name))
+        if on_progress: on_progress("sending", 1, 1); on_progress("finishing", 1, 1)
+    monkeypatch.setattr(dashboard.mx06, "print_image", fake_print)
+    for i, shade in ((1, 40), (2, 200), (3, 120)):
+        Image.new("RGB", (1200, 800), (shade,) * 3).save(tmp_path / f"0000{i}.jpg")
+    return types.SimpleNamespace(client=TestClient(dashboard.app), calls=calls, d=dashboard, photos=tmp_path)
+
+
+def start_print(app, ids):
+    return app.client.post("/api/print-strip/start", json={"photo_ids": ids})
+
+
+def test_print_strip_is_refused_for_no_photos_or_too_many(strip_app):
+    assert start_print(strip_app, []).status_code == 400
+    assert start_print(strip_app, ["00001"] * 9).status_code == 400
+    assert strip_app.calls == []
+
+
+def test_print_strip_is_refused_for_an_id_that_is_not_a_number(strip_app):
+    for bad in (["../settings"], ["00001.jpg"], [1], "00001"):
+        assert strip_app.client.post("/api/print-strip/start", json={"photo_ids": bad}).status_code == 400
+    assert strip_app.calls == []
+
+
+def test_print_strip_names_a_photo_that_is_missing_or_unreadable(strip_app):
+    r = start_print(strip_app, ["00001", "00009"])
+    assert r.status_code == 400 and "00009" in r.json()["detail"]
+    (strip_app.photos / "00059.jpg").write_bytes(b"")
+    r = start_print(strip_app, ["00059"])
+    assert r.status_code == 400 and "00059" in r.json()["detail"]
+    assert strip_app.calls == []
+
+
+def test_print_strip_prints_the_photos_in_the_order_given(strip_app):
+    import photostrip
+    r = start_print(strip_app, ["00002", "00001"])
+    assert r.status_code == 200
+    image, name = strip_app.calls[0]
+    want = photostrip.make_strip([str(strip_app.photos / "00002.jpg"), str(strip_app.photos / "00001.jpg")])
+    assert (image.size, image.tobytes(), name) == (want.size, want.tobytes(), "MX99")
+    assert strip_app.client.get("/api/print-strip/progress").json()["status"] == "done"
+
+
+def test_a_second_print_is_refused_while_one_runs(strip_app):
+    strip_app.d.print_progress["status"] = "sending"
+    assert start_print(strip_app, ["00001"]).status_code == 409
+
+
+@pytest.mark.parametrize("error,says", [
+    ("PrinterNotFound", "not found"),
+    ("PrinterLost", "may be incomplete"),
+    ("PrintTimedOut", "may be incomplete"),
+    ("BluetoothUnavailable", "Bluetooth"),
+])
+def test_a_failed_print_says_why_and_frees_the_printer(strip_app, monkeypatch, error, says):
+    async def failing(image, name="MX06", on_progress=None, **kw):
+        raise getattr(strip_app.d.mx06, error)("boom")
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", failing)
+    assert start_print(strip_app, ["00001"]).status_code == 200
+    progress = strip_app.client.get("/api/print-strip/progress").json()
+    assert progress["status"] == "error" and says in progress["message"]
+    monkeypatch.setattr(strip_app.d.mx06, "print_image", lambda *a, **k: asyncio_noop())
+    assert start_print(strip_app, ["00001"]).status_code == 200
+
+
+async def asyncio_noop():
+    return None
+
+
+def fake_deleter(app, monkeypatch, gone=()):
+    deleted = []
+    async def delete(path):
+        if path.rsplit("/", 1)[-1] in gone: raise RuntimeError("404 Not Found")
+        deleted.append(path); return {"success": True}
+    monkeypatch.setattr(app.d.reframe_client, "delete", delete)
+    return deleted
+
+
+def test_delete_selected_deletes_only_the_ids_given(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch)
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00003"]})
+    assert r.status_code == 200 and deleted == ["/photos/00001", "/photos/00003"]
+    assert r.json() == {"deleted": ["00001", "00003"], "failed": []}
+
+
+def test_delete_selected_reports_a_photo_that_is_gone_and_deletes_the_rest(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch, gone={"00002"})
+    r = strip_app.client.post("/api/photos/delete", json={"photo_ids": ["00001", "00002", "00003"]}).json()
+    assert r["deleted"] == ["00001", "00003"] and [f["id"] for f in r["failed"]] == ["00002"]
+    assert deleted == ["/photos/00001", "/photos/00003"]
+
+
+def test_delete_selected_refuses_an_empty_list_and_bad_ids(strip_app, monkeypatch):
+    deleted = fake_deleter(strip_app, monkeypatch)
+    for bad in ([], ["a/b"], ["00001", "../x"]):
+        assert strip_app.client.post("/api/photos/delete", json={"photo_ids": bad}).status_code == 400
+    assert deleted == []
+
+
+def test_printer_name_setting(dashboard):
+    assert merge_defaults({})["printer"]["name"] == "MX06"
+    for bad in ("", "x" * 33):
+        with pytest.raises(dashboard.SettingsValidationError):
+            dashboard.validate_settings(merge_defaults({"printer": {"name": bad}}))
+    dashboard.validate_settings(merge_defaults({}))
+
+
+def test_two_quick_print_requests_print_once(strip_app):
+    import asyncio, httpx
+    async def both():
+        transport = httpx.ASGITransport(app=strip_app.d.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return await asyncio.gather(*(c.post("/api/print-strip/start", json={"photo_ids": ["00001", "00002"]}) for _ in range(2)))
+    codes = sorted(r.status_code for r in asyncio.run(both()))
+    assert codes == [200, 409]
+
+
+def test_an_unreadable_photo_does_not_leave_the_printer_claimed(strip_app):
+    (strip_app.photos / "00059.jpg").write_bytes(b"")
+    assert start_print(strip_app, ["00059"]).status_code == 400
+    assert start_print(strip_app, ["00001"]).status_code == 200

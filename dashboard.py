@@ -21,6 +21,8 @@ import httpx
 from PIL import Image
 
 from settings_defaults import merge_defaults
+import mx06
+import photostrip
 
 CAMERA_AVAILABLE = False
 
@@ -226,6 +228,11 @@ def validate_settings(settings: Dict[str, Any]) -> None:
     boolean(arena.get("enabled"), "extensions.arena.enabled")
     text(arena.get("channel", ""), "extensions.arena.channel", 200)
     text(arena.get("access_token", ""), "extensions.arena.access_token", 4096)
+
+    printer = section(settings, "printer", "printer")
+    text(printer.get("name"), "printer.name", 32)
+    if not printer.get("name"):
+        raise SettingsValidationError("printer.name cannot be empty")
 
 class SettingsManager:
     """Manages settings operations for the dashboard."""
@@ -3931,6 +3938,103 @@ async def delete_photos_background(all_photos):
     except Exception as e:
         delete_progress["status"] = "error"
         delete_progress["message"] = f"Error: {str(e)}"
+
+# ═══════════════════════════════════════════════════════════════════
+# Photo strips on the MX06 thermal printer, and deleting chosen photos.
+# Printing runs here, never in the camera service: a Bluetooth call that
+# hangs must not hold up the shutter.
+# ═══════════════════════════════════════════════════════════════════
+import re as _re
+
+MAX_STRIP_PHOTOS = 8
+PHOTO_ID_PATTERN = _re.compile(r"[0-9]{1,10}")
+PRINT_RUNNING = {"scanning", "sending", "finishing"}
+print_progress = {"status": "idle", "message": "", "sent": 0, "total": 0}
+
+PRINT_FAILURES = {
+    mx06.PrinterNotFound: "Printer {name} not found. Is it switched on, nearby, and not connected to the phone app?",
+    mx06.PrinterLost: "Lost the printer while printing; the strip may be incomplete.",
+    mx06.PrintTimedOut: "The printer stopped answering; the strip may be incomplete.",
+    mx06.BluetoothUnavailable: "Bluetooth is not working on the camera ({error}). See docs/software-setup.md, Photo strips.",
+}
+
+
+async def _photo_ids_from(request: Request, minimum: int, maximum: int) -> List[str]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be JSON")
+    ids = body.get("photo_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, str) and PHOTO_ID_PATTERN.fullmatch(i) for i in ids):
+        raise HTTPException(status_code=400, detail="photo_ids must be a list of photo numbers")
+    if not minimum <= len(ids) <= maximum:
+        raise HTTPException(status_code=400, detail=f"Choose between {minimum} and {maximum} photos")
+    return ids
+
+
+async def _run_print(image, printer_name: str):
+    def on_progress(stage, sent, total):
+        print_progress.update(status=stage, sent=sent, total=total, message={
+            "scanning": f"Looking for printer {printer_name}...",
+            "sending": "Printing...",
+            "finishing": "Finishing the strip...",
+        }[stage])
+    try:
+        await mx06.print_image(image, name=printer_name, on_progress=on_progress)
+        print_progress.update(status="done", message="Strip printed.")
+    except Exception as e:
+        template = next((t for kind, t in PRINT_FAILURES.items() if isinstance(e, kind)), "Print failed: {error}")
+        logging.warning("Strip print failed: %r", e)
+        print_progress.update(status="error", message=template.format(name=printer_name, error=e))
+
+
+@app.post("/api/print-strip/start")
+async def start_print_strip(request: Request, background_tasks: BackgroundTasks):
+    """Print the chosen photos, top to bottom in the order given, as one strip."""
+    ids = await _photo_ids_from(request, 1, MAX_STRIP_PHOTOS)
+    if print_progress.get("status") in PRINT_RUNNING:
+        raise HTTPException(status_code=409, detail="A strip is already printing")
+    paths = [os.path.join(PHOTOS_PATH, f"{photo_id}.jpg") for photo_id in ids]
+    missing = [photo_id for photo_id, path in zip(ids, paths) if not os.path.isfile(path)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Photo not found: {', '.join(missing)}")
+    printer_name = settings_manager.load_settings().get("printer", {}).get("name") or "MX06"
+    previous = dict(print_progress)
+    # Claim the printer before the first await, so a second request cannot slip in.
+    print_progress.update(status="scanning", message="Making the strip...", sent=0, total=0)
+    try:
+        image = await asyncio.to_thread(photostrip.make_strip, paths)
+    except photostrip.UnreadablePhoto as e:
+        print_progress.clear(); print_progress.update(previous)
+        raise HTTPException(status_code=400, detail=f"Cannot read photo {Path(e.path).stem}")
+    except Exception:
+        print_progress.clear(); print_progress.update(previous)
+        raise
+    background_tasks.add_task(_run_print, image, printer_name)
+    return {"status": "started", "photos": len(ids)}
+
+
+@app.get("/api/print-strip/progress")
+async def get_print_progress():
+    return print_progress
+
+
+@app.post("/api/photos/delete")
+async def delete_selected_photos(request: Request):
+    """Delete the chosen photos through the camera service, one at a time."""
+    ids = list(dict.fromkeys(await _photo_ids_from(request, 1, 1000)))
+    deleted, failed = [], []
+    for photo_id in ids:
+        try:
+            result = await reframe_client.delete(f"/photos/{photo_id}")
+            if result.get("success", True):
+                deleted.append(photo_id)
+            else:
+                failed.append({"id": photo_id, "error": result.get("message") or result.get("error") or "not deleted"})
+        except Exception as e:
+            failed.append({"id": photo_id, "error": str(e)})
+    return {"deleted": deleted, "failed": failed}
+
 
 @app.post("/api/photos/delete-all/start")
 async def start_delete_all(background_tasks: BackgroundTasks):
