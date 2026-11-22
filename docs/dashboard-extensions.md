@@ -142,4 +142,4 @@ extension_registry = ExtensionRegistry([
 ])
 ```
 
-Add its settings defaults to `SettingsManager.default_settings`, `settings.example.json`, and the dashboard settings UI. If the extension has a secret, mirror the Are.na write-only token behavior.
+Add its settings defaults to `settings_defaults.py` and the dashboard settings UI. If the extension has a secret, mirror the Are.na write-only token behavior.

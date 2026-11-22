@@ -57,13 +57,14 @@ chmod +x install.sh
 
   <img src="docs/images/reframe.gif" alt="reFrame ePaper camera in action" width="720" />
 
-reFrame is extremely minimalist by design. It has only a single button; no viewfinder, flash or zoom.
+reFrame is extremely minimalist by design. It has one button, which is both power and shutter; no viewfinder, flash or zoom.
 
-1. Press the combined power + shutter button to wake the camera and take a photo.
-2. The original image is saved, then dithered to a 6-color palette to match the screen. The processed image is sent to the ePaper display.
-3. The ePaper screen takes about 20 seconds to display the photo.
-4. Press the button again to take a new photo. It'll replace the previous one on the display.
-5. When you turn the camera off, the last photo will stay on the screen.
+1. Press the button to turn the camera on. Once it has booted and joined WiFi, the screen shows the dashboard QR code (a setting, on by default).
+2. Press the button to take a photo. With no photos yet, the screen says so.
+3. The original image is saved, then dithered to a 6-color palette to match the screen. The processed image is sent to the ePaper display.
+4. The ePaper screen takes about 20–35 seconds to display the photo. Presses during a refresh are ignored.
+5. Step back through older photos from the dashboard, or let the slideshow setting do it automatically.
+6. Hold the button for two seconds to turn the camera off. By default it also turns itself off after 10 minutes without a photo or a dashboard visit. The last photo stays on the screen.
 
 A web dashboard, accessible over the local network, lets you browse photos, download originals, change the displayed image, adjust camera settings, and optionally upload dithered photos to Are.na.
 
@@ -77,7 +78,7 @@ reframe/
 ├── dashboard.py               # web dashboard for photo management
 ├── dashboard_proxy.py         # local port 80 dashboard proxy
 ├── install.sh                 # one-command setup script
-├── settings.example.json      # default configuration
+├── settings_defaults.py       # default configuration
 ├── scripts/                   # hardware and privileged system helpers
 │   ├── enable_hdr.sh
 │   ├── reframe-apply-update

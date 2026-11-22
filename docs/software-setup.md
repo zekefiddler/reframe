@@ -14,10 +14,7 @@ Download and install [Raspberry Pi Imager](https://www.raspberrypi.com/software/
 - **WiFi:** enter your home network name and password. If you want to use the camera on the go, also add your phone's hotspot (you can add multiple networks)
 - **Services:** Enable SSH with password authentication
 
-Eject the card, insert it into the Pi Zero 2 W, and power it on. On a new
-PiSugar 3, the first power-on may require a short press followed by a long
-press. The reFrame installer disables this accidental-touch prevention mode so
-later power-ons use a single press.
+Eject the card, insert it into the Pi Zero 2 W, and power it on. Any username works: the installer sets the services up for whoever runs it.
 
 ## 2. SSH into the Pi
 
@@ -34,43 +31,23 @@ Enter the password you set in the imager.
 ```bash
 sudo apt update
 sudo apt install -y git
-git clone https://github.com/kaloyaan/reframe.git
+git clone https://github.com/zekefiddler/reframe.git
 cd reframe
 chmod +x install.sh
 ./install.sh
 ```
 
-If the official PiSugar installer asks you to select a model, choose **PiSugar 3**. After installation:
+### Button and power (PiSugar 3)
 
-- `pisugar-server` runs as a systemd service and starts on boot
-- Battery level is available via TCP on port `8423` (the dashboard reads this automatically)
-- Power management web UI is at `http://reframe.local:8421`
+The camera's one button is the PiSugar 3 power button, wired out to the case as the [build guide](build-guide.md) shows. The Pi reads it over I2C.
 
-By default, PiSugar 3 ships with accidental-touch prevention enabled. In that mode, power-on requires a short press followed by a long press. reFrame disables that mode during installation so the camera behaves like this:
+- **Short press:** takes a photo and shows it. A press while the panel is refreshing is ignored.
+- **Press while off:** turns the camera on.
+- **Hold for two seconds:** shuts the camera down cleanly, then the PiSugar cuts power.
 
-- **single press while off** = power on
-- **startup** = automatically take and display one photo
-- **single press while on** = take a new photo
-- **long press while on** = shut down
-- **10 minutes of inactivity** = automatic shutdown to prevent battery drain
+The installer runs `scripts/setup-pisugar.sh`, which turns on I2C, installs PiSugar's power manager, and adds one sudo rule that lets the camera's user run `shutdown -h now` for the inactivity timeout. If I2C was off, the script asks for a reboot and a second run.
 
-The installer applies this with the PiSugar Power Manager command `set_anti_mistouch false`. If you installed PiSugar after running `install.sh`, run the reFrame installer again, or apply the setting manually:
-
-```bash
-echo "set_anti_mistouch false" | nc -q 0 127.0.0.1 8423
-```
-
-You can check the current setting with:
-
-```bash
-echo "get anti_mistouch" | nc -q 0 127.0.0.1 8423
-```
-
-> **Note:** reFrame reads the button directly via I2C (address `0x57`) for photo capture. PiSugar still handles battery monitoring, one-press power-on, and long-press shutdown.
-
-### PiSugar RTC
-
-The installer keeps the Raspberry Pi system clock and the PiSugar 3 real-time clock in UTC. reFrame synchronizes them automatically on startup: it syncs the system clock from the RTC, and whenever network time becomes available it updates both clocks.
+PiSugar's power manager runs as root and runs shell commands it is sent, with no login on any of its ports or on its socket. The script therefore removes its network ports (so there is no PiSugar web page or phone app) and moves its socket into a root-only directory. The dashboard reads the battery level straight from the PiSugar over I2C. On a camera that is already installed, update the software first (`sudo /usr/local/sbin/reframe-apply-update`, which installs the `smbus2` module the button needs), then run only that script: `bash scripts/setup-pisugar.sh`. A camera that was installed earlier also keeps its saved settings, so check the QR code and inactivity shutdown switches under system settings in the dashboard.
 
 ## 4. Reboot
 
@@ -78,7 +55,7 @@ The installer keeps the Raspberry Pi system clock and the PiSugar 3 real-time cl
 sudo reboot
 ```
 
-After rebooting, reFrame starts automatically. The camera takes a photo on startup, sends it to the ePaper screen, then saves the original JPEG and dithered PNG in the background.
+After rebooting, reFrame starts automatically. The panel keeps showing the last photo (or, with no photos yet, a message asking for the first one) until the camera joins WiFi, when it shows the dashboard QR code. Press the button to take a photo.
 
 ### Troubleshooting / Verifying the Installation
 
@@ -95,11 +72,11 @@ Each line should say `active`. Confirm that the services select the managed
 Python environment:
 
 ```bash
-/home/cam/reframe/scripts/reframe-python -c \
+~/reframe/scripts/reframe-python -c \
     'import sys; print(sys.executable)'
 ```
 
-The result should be `/home/cam/reframe/.venv/bin/python`. Finally, test both
+The result should be the checkout's `.venv/bin/python` (for example `/home/<you>/reframe/.venv/bin/python`). Finally, test both
 dashboard paths from the camera itself:
 
 ```bash
@@ -129,7 +106,7 @@ http://reframe.local:8000
 
 If you used a different Pi hostname during Raspberry Pi Imager setup, replace `reframe` with that hostname.
 
-Dashboard settings include a software update button for git-based installs. It checks the configured upstream repo, installs fast-forward updates only, preserves ignored user data such as your settings and photos, refreshes dependencies and service files, and asks you to reboot after a successful update.
+Dashboard settings include a software update button for git-based installs. It checks the configured upstream repo, installs fast-forward updates only, preserves ignored user data such as your settings and photos, then tries to refresh dependencies and service files. The installer adds no passwordless sudo rule, so that last step stops and asks you to finish over SSH with `sudo /usr/local/sbin/reframe-apply-update`, then reboot.
 
 Advanced export settings include an optional 2× dithered-image mode. When enabled, dithered downloads and Are.na uploads are enlarged at export time to help them look sharp on social media. Original photos, stored dithered photos, gallery previews, display output, and download-all ZIP files are unchanged. This option is disabled by default.
 
@@ -139,7 +116,7 @@ To use the camera without a WiFi network, enable your phone's hotspot. As long a
 
 On iPhone, you can find your hotspot name under Settings → General → About → Name. Enable **Maximize Compatibility** in hotspot settings for the Pi to connect reliably.
 
-Whenever the camera connects or reconnects to WiFi, it shows a dashboard QR code on the ePaper display. The network watcher remains active after startup, and the QR encodes the numeric IP when one is available so it also works on hotspots that do not resolve `.local` hostnames. This behavior is enabled by default and can be disabled under system settings in the dashboard.
+The camera shows a dashboard QR code on the ePaper display whenever it connects or reconnects to WiFi, which also makes it the sign that the camera has finished booting. The network watcher remains active after startup, and the QR encodes the numeric IP when one is available so it also works on hotspots that do not resolve `.local` hostnames. This behavior is enabled by default and can be disabled under system settings in the dashboard. Away from any known WiFi network, no QR code appears.
 
 On Android/Pixel hotspots, `.local` hostnames may not resolve reliably. In that case, use the QR code's numeric IP URL, for example `http://192.168.x.x`.
 
@@ -163,17 +140,17 @@ Under **Settings → Advanced → Screen Refresh**, you can enable **fast mode**
 
 ## Photo Formats And Capture Flow
 
-reFrame captures the startup/button photo into memory first so the image can be dithered and sent to the ePaper display quickly. It then saves files in the background:
+reFrame captures each shutter-button photo into memory first so the image can be dithered and sent to the ePaper display quickly. It then saves files in the background:
 
 - Original camera captures are saved as JPEGs for faster capture and smaller files.
 - The display/dashboard dithered version is saved as a PNG so the 6-color dithered image stays crisp.
 - Immediately after a capture, the dashboard may take a moment to show the newest files while the background save finishes.
 
-By default, reFrame shuts down automatically after 10 minutes without button, dashboard, or display activity to avoid draining the PiSugar battery. You can change this in `settings.json` with `system.auto_timeout_minutes` and `system.auto_timeout_enabled`.
+Auto-shutdown after inactivity is on by default, so a camera left on does not run its battery flat. Only photos and dashboard use count as activity: a slideshow or an SSH session does not keep the camera on. Turn it off with `system.auto_timeout_enabled` in `settings.json` (or the dashboard) and set the delay with `system.auto_timeout_minutes` (10 minutes by default). It runs `sudo shutdown -h now`, which the sudo rule from `scripts/setup-pisugar.sh` allows without a password.
 
 ## Other Displays Or Cameras
 
-The reference build uses Raspberry Pi Camera Module 3, PiSugar 3, and a Waveshare 4" Spectra 6 ePaper HAT, but the hardware-specific code is intentionally isolated in `CameraManager`, `EInkDisplay`, and the small button block in `reframe.py`.
+This build uses Raspberry Pi Camera Module 3, a PiSugar 3 battery board, and a Waveshare 4" Spectra 6 ePaper HAT, but the hardware-specific code is intentionally isolated in `CameraManager`, `EInkDisplay`, and the small button block in `reframe.py`.
 
 See [Hardware Porting Notes](hardware-porting.md) for adapting the repo for Pimoroni, Good Display, another camera module, or a different button/power board.
 
@@ -211,18 +188,16 @@ If you prefer to set things up by hand, here's what the install script does:
 ```bash
 sudo apt update
 sudo apt install -y git python3-pip python3-venv python3-picamera2 python3-spidev \
-    python3-gpiozero v4l-utils i2c-tools netcat-openbsd wget
+    python3-gpiozero python3-lgpio v4l-utils netcat-openbsd
 ```
 
-### PiSugar Power Manager
+### PiSugar
 
 ```bash
-wget https://cdn.pisugar.com/release/pisugar-power-manager.sh
-bash pisugar-power-manager.sh -c release
-echo "set_anti_mistouch false" | nc -q 0 127.0.0.1 8423
+bash scripts/setup-pisugar.sh
 ```
 
-Select **PiSugar 3** if prompted by the PiSugar installer.
+See [Button and power](#button-and-power-pisugar-3) for what it changes.
 
 ### Python Packages
 
@@ -242,7 +217,6 @@ system's `EXTERNALLY-MANAGED` marker or globally enable
 ### Enable Hardware Interfaces
 
 ```bash
-sudo raspi-config nonint do_i2c 0
 sudo raspi-config nonint do_spi 0
 ```
 
@@ -251,33 +225,24 @@ The camera should be auto-detected. If not, add `camera_auto_detect=1` to your b
 ### User Permissions
 
 ```bash
-sudo usermod -a -G video,i2c,spi,gpio cam
+sudo usermod -a -G video,spi,gpio "$USER"
 ```
 
 Log out and back in for changes to take effect.
 
 ### Configuration
 
-```bash
-cp settings.example.json settings.json
-```
+No step needed: the dashboard writes `settings.json` from `settings_defaults.py` on first start.
 
 ### Systemd Services
 
 ```bash
-sudo cp systemd/reframe.service /etc/systemd/system/
-sudo cp systemd/reframe-dashboard.service /etc/systemd/system/
-sudo cp systemd/reframe-dashboard-proxy.service /etc/systemd/system/
-sudo cp systemd/reframe-rtc-restore.service /etc/systemd/system/
-sudo cp systemd/reframe-rtc-update.service /etc/systemd/system/
+printf 'REFRAME_USER=%s\nREFRAME_GROUP=%s\nREFRAME_REPO=%s\n' "$(id -un)" "$(id -gn)" "$PWD" \
+    | sudo tee /etc/default/reframe > /dev/null
 chmod +x scripts/enable_hdr.sh scripts/reframe-python
-sudo install -o root -g root -m 0755 scripts/reframe-rtc-sync /usr/local/sbin/reframe-rtc-sync
-sudo install -d -o root -g root -m 0755 /var/lib/reframe
-sudo timedatectl set-timezone UTC
-sudo timedatectl set-ntp true
-sudo systemctl daemon-reload
+sudo scripts/reframe-apply-update   # builds .venv and installs the three units for this user and path
 sudo systemctl reenable reframe.service
-sudo systemctl enable reframe-dashboard.service reframe-dashboard-proxy.service reframe-rtc-restore.service reframe-rtc-update.service
+sudo systemctl enable reframe-dashboard.service reframe-dashboard-proxy.service
 sudo reboot
 ```
 
@@ -285,7 +250,7 @@ sudo reboot
 
 The camera service selects the `ondemand` CPU governor when the host supports it. This lets capture and image processing use the Pi's full clock under load while returning to its lower idle clock between photos.
 
-The installer optimizes for fastest boot-to-first-photo while keeping WiFi, SSH, mDNS, PiSugar, and camera capture working.
+The installer optimizes for fastest boot-to-first-photo while keeping WiFi, SSH, mDNS, and camera capture working.
 
 It writes these headless hardware settings to the Pi boot config.
 
@@ -323,7 +288,6 @@ ssh.service
 wpa_supplicant.service
 dhcpcd.service
 avahi-daemon.service
-pisugar-server.service
 reframe.service
 reframe-dashboard.service
 reframe-dashboard-proxy.service
@@ -343,7 +307,7 @@ sudo systemctl enable --now bluetooth.service hciuart.service
 
 **Camera not detected**
 - Verify the ribbon cable is seated properly on both ends
-- Ensure `cam` is in the `video` group: `groups cam`
+- Ensure your user is in the `video` group: `groups`
 
 **Display not updating**
 - Confirm SPI is enabled: `sudo raspi-config nonint get_spi` (should return `0`)
@@ -351,11 +315,13 @@ sudo systemctl enable --now bluetooth.service hciuart.service
 - Review logs: `sudo journalctl -u reframe.service`
 
 **Button not responding**
-- Confirm I2C is enabled: `sudo raspi-config nonint get_i2c` (should return `0`)
-- Check: `sudo i2cdetect -y 1` (should show a device at address `57` for PiSugar)
+- Confirm I2C is enabled: `sudo raspi-config nonint get_i2c` (should return `0`). After turning it on, reboot before the PiSugar answers
+- Check that the PiSugar answers: `echo "get battery" | sudo nc -U -q 0 /run/pisugar-server/pisugar-server.sock`
+- Watch for presses: `sudo journalctl -u reframe.service -f` logs "Shutter button pressed"
+- The dashboard's diagnostics show "Shutter button is not responding" while the Pi cannot read the PiSugar; the dashboard's own shutter keeps working
 
 **Service won't start**
-- The service files expect the repo at `/home/cam/reframe`
+- The installed units are filled in from `/etc/default/reframe` (`REFRAME_USER`, `REFRAME_REPO`); re-run `./install.sh` after moving the checkout
 - Check: `sudo systemctl status reframe.service`
 - View full logs: `sudo journalctl -u reframe.service --no-pager`
 
@@ -363,5 +329,5 @@ sudo systemctl enable --now bluetooth.service hciuart.service
 - Check the backend directly: `wget -S -O /dev/null http://127.0.0.1:8000/`
 - Check its status: `sudo systemctl status reframe-dashboard.service --no-pager -l`
 - View this boot's logs: `sudo journalctl -u reframe-dashboard.service -b --no-pager -n 100`
-- Confirm the service interpreter exists: `test -x /home/cam/reframe/.venv/bin/python && echo OK`
+- Confirm the service interpreter exists: `test -x ~/reframe/.venv/bin/python && echo OK`
 - Re-run `./install.sh` if the virtual environment or dependencies are missing
